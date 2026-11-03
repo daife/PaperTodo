@@ -35,6 +35,8 @@ Public plugin types in [`../PaperTodo.Plugin.Abstractions/`](../PaperTodo.Plugin
 
 > **Trust boundary: PaperTodo does not provide a security sandbox for plugins.** Both Native and Web plugins must be treated as trusted code. Install plugins only from sources you trust.
 
+Todo snapshots expose the ordered full association list in `Links` (`links` in Web JSON), with `PaperId`, `Path` and `IsDirectory` per target. Legacy `LinkedPaperId` / `LinkedPath` fields describe the first target. Existing scalar linked-paper update requests still replace the complete association list.
+
 ## 1. Quick Start
 
 PaperTodo supports two plugin types:
@@ -539,7 +541,7 @@ Settings are an explicit typed catalog. Per-paper geometry/content, live queue s
 
 All three adapters share one service. Core preferences synchronously save through `StateStore`, restore their previous values and coupled state on save failure, then refresh relevant UI/runtime paths. Startup registration and background preferences retain their existing independent persistence owners. Errors include `setting_not_found`, `invalid_setting_value`, `setting_dependency`, `settings_busy`, `setting_read_only`, `shortcut_conflict`, and `save_failed`. A committed setting is not reported as failed merely because a later UI refresh failed.
 
-Todo linking remains available through the existing Workspace update request (`UpdateLinkedPaper=true`, `LinkedPaperId=null` unlinks). MCP adds `update_todo(clear_linked_paper=true)` for unambiguous unlinking; it conflicts with a non-null `linked_paper_id`. Omitting both leaves the link unchanged. Before creating a long-detail Note for a Todo, query `todo.paper_links`; when disabled or unknown, skip that approach unless the user explicitly requests a settings change.
+Todo associations support multiple papers, files and folders. Workspace `UpdateTodoRequest` accepts `AddLinks`, `RemoveLinks` (lists of `TodoLinkInput`, each specifying exactly one `PaperId` or absolute `Path`) and `ClearLinks`. Web callers use `addLinks`, `removeLinks` and `clearLinks`. MCP exposes `update_todo(add_links=[{"paper_id":"note-id"},{"path":"C:\\Work"}])`, `remove_links` and `clear_links`; these operations require full writes. Additions are deduplicated, file/folder additions must exist, and removing a missing path is allowed. A request clears first, removes selected targets, then appends targets as one commit/undo operation. `clear_links=true` with `add_links` replaces the list. Legacy Workspace `UpdateLinkedPaper` and MCP `linked_paper_id` / `clear_linked_paper` still replace/clear the entire list and cannot be combined with collection updates. Omitting all link arguments preserves existing associations. Before creating a long-detail Note for a Todo, query `todo.paper_links`; when disabled or unknown, skip that approach unless the user explicitly requests a settings change.
 
 
 ## 6. Workspace Permissions and Data API

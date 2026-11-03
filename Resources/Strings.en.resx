@@ -1542,4 +1542,7 @@ When off, open at the docked edge or remembered position.</value>
   <data name="TopBarExternalEditor" xml:space="preserve">
     <value>Open externally</value>
   </data>
+  <data name="MenuTodoLinks" xml:space="preserve">
+    <value>Linked items</value>
+  </data>
 </root>

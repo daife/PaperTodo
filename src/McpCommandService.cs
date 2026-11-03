@@ -220,11 +220,18 @@ internal sealed partial class McpCommandService
         var hasLinkedPaper = parameters.TryGetProperty(
             "linked_paper_id",
             out var linkedPaperValue);
-        if (!hasText && !hasDone && !hasOrder && !hasLinkedPaper)
+        var addLinks = ReadTodoLinks(parameters, "add_links");
+        var removeLinks = ReadTodoLinks(parameters, "remove_links");
+        var clearLinks = OptionalBoolean(parameters, "clear_links") ?? false;
+        var hasCollectionLinks = addLinks != null || removeLinks != null || clearLinks;
+        if (hasLinkedPaper && hasCollectionLinks)
+            throw new McpApiException("invalid_params", "Legacy linked-paper arguments cannot be combined with collection link arguments.");
+        if (hasCollectionLinks) RequireFullWrites();
+        if (!hasText && !hasDone && !hasOrder && !hasLinkedPaper && !hasCollectionLinks)
         {
             throw new McpApiException(
                 "invalid_params",
-                "Provide text, done, order and/or linked_paper_id.");
+                "Provide text, done, order or a link update.");
         }
 
         string? text = null;
@@ -283,7 +290,10 @@ internal sealed partial class McpCommandService
                 Done = done,
                 Order = order,
                 UpdateLinkedPaper = hasLinkedPaper,
-                LinkedPaperId = linkedPaperId
+                LinkedPaperId = linkedPaperId,
+                AddLinks = addLinks,
+                RemoveLinks = removeLinks,
+                ClearLinks = clearLinks
             },
             PaperOperationContext.Mcp());
 
@@ -300,6 +310,27 @@ internal sealed partial class McpCommandService
         }
 
         return TodoDetails(RequireTodo(paperId, todoId));
+    }
+
+    private static IReadOnlyList<TodoLinkInput>? ReadTodoLinks(JsonElement parameters, string name)
+    {
+        if (!parameters.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new McpApiException("invalid_params", $"{name} must be an array.");
+        var links = new List<TodoLinkInput>();
+        var index = 0;
+        foreach (var element in value.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new McpApiException("invalid_params", $"{name}[{index}] must be an object.");
+            var paperId = OptionalString(element, "paper_id", 64);
+            var path = OptionalString(element, "path", 32767);
+            if (string.IsNullOrWhiteSpace(paperId) == string.IsNullOrWhiteSpace(path))
+                throw new McpApiException("invalid_params", $"{name}[{index}] must specify exactly one paper_id or path.");
+            links.Add(new TodoLinkInput { PaperId = paperId, Path = path });
+            index++;
+        }
+        return links;
     }
 
     private object SetTodoReminder(JsonElement parameters)
@@ -461,6 +492,7 @@ internal sealed partial class McpCommandService
         order = item.Order,
         linked_paper_id = item.LinkedPaperId,
         linked_path = item.LinkedPath,
+        links = item.Links.Select(link => new { paper_id = link.PaperId, path = link.Path, is_directory = link.IsDirectory }).ToArray(),
         reminder_at = item.ReminderAt?.ToString("O", CultureInfo.InvariantCulture)
     };
 

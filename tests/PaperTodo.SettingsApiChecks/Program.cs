@@ -561,6 +561,9 @@ internal static partial class Program
                 .TryGetProperty("order", out _),
             "MCP update_todo schema exposes order.");
 
+        foreach (var linkParameter in new[] { "add_links", "remove_links", "clear_links" })
+            Check(updateTool.ProtocolTool.InputSchema.GetProperty("properties").TryGetProperty(linkParameter, out _),
+                "MCP update_todo schema exposes " + linkParameter);
         var createNoteTool = ModelContextProtocol.Server.McpServerTool.Create(
             typeof(McpTools).GetMethod(nameof(McpTools.CreateNote))!,
             toolTarget);
@@ -612,6 +615,14 @@ internal static partial class Program
             var count = requests.Count;
             Throws<McpException>(() => tools.UpdateTodo("paper", "todo", linked_paper_id: "note", clear_linked_paper: true));
             Check(requests.Count == count, "Conflicting link arguments cause no request or mutation.");
+            await tools.UpdateTodo("paper", "todo", add_links: [new() { PaperId = "note" }, new() { Path = @"C:\Work" }]);
+            var targets = requests[^1].GetProperty("params").GetProperty("add_links");
+            Check(targets.GetArrayLength() == 2 && targets[0].GetProperty("paper_id").GetString() == "note" &&
+                targets[1].GetProperty("path").GetString() == @"C:\Work", "Mixed links survive actual tool and pipe serialization.");
+            await tools.UpdateTodo("paper", "todo", remove_links: [new() { Path = @"C:\Work" }], clear_links: true);
+            Check(requests[^1].GetProperty("params").GetProperty("clear_links").GetBoolean() &&
+                requests[^1].GetProperty("params").GetProperty("remove_links").GetArrayLength() == 1,
+                "Remove and clear links survive actual tool serialization.");
             await tools.ListSettings("todo");
             Check(requests[^1].GetProperty("params").GetProperty("category").GetString() == "todo", "MCP list category forwarded.");
             await tools.GetSetting("todo.paper_links");

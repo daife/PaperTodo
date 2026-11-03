@@ -806,7 +806,14 @@ public sealed partial class PaperWindow
 
             MenuItem? reminderMenu = null;
             itemMenu.Items.Add(MenuHeader(Strings.Get("MenuTodoItem")));
-            if (hasLinkedPaper)
+            if (item.GetQuickLaunchLinks().Count() > 1)
+            {
+                var linksMenu = MenuItem(Strings.Get("MenuTodoLinks"), (_, _) => { });
+                PopulateTodoLinksMenu(linksMenu, item, allowUnlink: true);
+                itemMenu.Items.Add(linksMenu);
+                itemMenu.Items.Add(MenuSeparator());
+            }
+            else if (hasLinkedPaper)
             {
                 var openMenuText = runLinkedScriptOnClick
                     ? Strings.Format("MenuEditLinkedScriptCapsule", linkedPaperTitle)
@@ -893,7 +900,14 @@ public sealed partial class PaperWindow
         AttachItemContextMenu(check);
         AttachItemContextMenu(text);
 
-        if (hasLinkedPath)
+        if (item.GetQuickLaunchLinks().Skip(1).Any() && VisibleTodoLinks(item).Any())
+        {
+            var linksButton = BuildTodoLinksButton(item, metrics);
+            AttachItemContextMenu(linksButton);
+            Grid.SetColumn(linksButton, 2);
+            grid.Children.Add(linksButton);
+        }
+        else if (hasLinkedPath)
         {
             var pathLinkButton = BuildTodoPathLinkButton(item, text, metrics);
             AttachItemContextMenu(pathLinkButton);
@@ -1694,7 +1708,7 @@ public sealed partial class PaperWindow
         var itemId = item.Id;
         var removedLinkedPaperIds = _paper.Items
             .Where(i => i.Id == itemId)
-            .Select(i => i.LinkedPaperId)
+            .SelectMany(i => i.LinkedPaperIds)
             .ToList();
 
         // 删除动画
@@ -1785,7 +1799,7 @@ public sealed partial class PaperWindow
 
         var completedItemIds = new HashSet<string>(completedItems.Select(i => i.Id), StringComparer.Ordinal);
         var removedLinkedPaperIds = completedItems
-            .Select(i => i.LinkedPaperId)
+            .SelectMany(i => i.LinkedPaperIds)
             .ToList();
         var clearDoneGeneration = ++_clearDoneGeneration;
 
@@ -1905,12 +1919,12 @@ public sealed partial class PaperWindow
     private void RefreshCapsuleEligibilityForLinkedPaperChanges(IEnumerable<PaperItem> previousItems)
     {
         var changedPaperIds = previousItems
-            .Select(item => item.LinkedPaperId)
+            .SelectMany(item => item.LinkedPaperIds)
             .Where(paperId => !string.IsNullOrWhiteSpace(paperId))
             .Select(paperId => paperId!)
             .ToHashSet(StringComparer.Ordinal);
         changedPaperIds.SymmetricExceptWith(_paper.Items
-            .Select(item => item.LinkedPaperId)
+            .SelectMany(item => item.LinkedPaperIds)
             .Where(paperId => !string.IsNullOrWhiteSpace(paperId))
             .Select(paperId => paperId!));
 
@@ -1989,8 +2003,7 @@ public sealed partial class PaperWindow
             return false;
         }
 
-        if (string.Equals(item.LinkedPaperId, paperId, StringComparison.Ordinal) &&
-            string.IsNullOrWhiteSpace(item.LinkedPath))
+        if (item.HasQuickLaunchLink(new(paperId, null)))
         {
             return true;
         }
@@ -1998,7 +2011,7 @@ public sealed partial class PaperWindow
         var focusedId = CurrentFocusedTodoItemId();
         var previousItems = CloneItems(_paper.Items);
         PushUndoSnapshot();
-        item.LinkPaper(paperId);
+        item.AddQuickLaunchLink(new(paperId, null));
         _controller.MarkDirty();
         ReconcileTodoRows([item.Id], focusedId);
         RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
@@ -2015,7 +2028,7 @@ public sealed partial class PaperWindow
         var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
         var previousItems = CloneItems(_paper.Items);
         PushUndoSnapshot();
-        item.ClearQuickLaunch();
+        item.RemoveQuickLaunchLink(new(item.LinkedPaperId, null));
         _controller.MarkDirty();
         ReconcileTodoRows([item.Id], focusedId);
         RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
@@ -2746,7 +2759,7 @@ public sealed partial class PaperWindow
         current.Done == restored.Done &&
         current.LinkedPaperId == restored.LinkedPaperId &&
         current.LinkedPath == restored.LinkedPath &&
-        current.LinkedPathIsDirectory == restored.LinkedPathIsDirectory &&
+        current.GetQuickLaunchLinks().SequenceEqual(restored.GetQuickLaunchLinks()) &&
         current.ReminderAt == restored.ReminderAt &&
         current.ReminderAt?.Offset == restored.ReminderAt?.Offset &&
         current.ReminderTriggered == restored.ReminderTriggered;

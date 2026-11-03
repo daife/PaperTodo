@@ -298,6 +298,8 @@ internal sealed partial class PaperBodyPluginHostApi : IPaperTodoHostApi, IPaper
             Text = canReadTodos ? value.Text : "",
             LinkedPaperId = canReadTodos ? value.LinkedPaperId : null,
             LinkedPath = canReadTodos ? value.LinkedPath : null,
+            LinkedPathIsDirectory = canReadTodos ? value.LinkedPathIsDirectory : null,
+            Links = canReadTodos ? value.Links : Array.Empty<TodoLinkSnapshot>(),
             ReminderAt = canReadTodos ? value.ReminderAt : null
         };
 

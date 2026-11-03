@@ -119,19 +119,22 @@ internal sealed partial class McpTools
         Destructive = true,
         Idempotent = true,
         OpenWorld = false)]
-    [Description("Fill or replace todo text, change completion state, reorder the item, and/or link another PaperTodo paper. Filling blank text needs additive writes; replacing existing text/state, reordering, or changing a paper link needs full writes.")]
+    [Description("Fill or replace todo text, change completion state, reorder the item, and/or manage multiple linked papers, files and folders. Filling blank text needs additive writes; replacing existing text/state, reordering, or changing links needs full writes.")]
     public Task<JsonElement> UpdateTodo(
         [Description("Exact todo paper ID.")] string paper_id,
         [Description("Exact todo item ID.")] string todo_id,
         [Description("Replacement text. Omit to keep text unchanged.")] string? text = null,
         [Description("Replacement completion state. Omit to keep it unchanged.")] bool? done = null,
         [Description("Zero-based target position within the todo paper. Values outside the current range are clamped; PaperTodo's completed-item ordering rules still apply. Omit to keep the current order. Requires full writes.")] int? order = null,
-        [Description("Paper ID to link from this todo, such as a Note containing longer details. Omit to keep the current link unchanged. Requires PaperTodo full writes.")] string? linked_paper_id = null,
-        [Description("Set true to unlink the todo's linked Paper without deleting the Note. Mutually exclusive with linked_paper_id. Requires full writes.")] bool clear_linked_paper = false,
+        [Description("Legacy replacement of ALL links with one paper ID. Prefer add_links to preserve existing targets. Requires full writes.")] string? linked_paper_id = null,
+        [Description("Legacy clear of ALL links. Prefer remove_links to unlink selected targets. Mutually exclusive with linked_paper_id. Requires full writes.")] bool clear_linked_paper = false,
+        [Description("Append targets without replacing existing links; duplicates are ignored. Each target specifies exactly one paper_id or absolute path. Files/folders must exist. Requires full writes.")] IReadOnlyList<McpTodoLinkInput>? add_links = null,
+        [Description("Remove selected paper_id/path targets, preserving the rest. Missing files/folders can still be unlinked. Requires full writes.")] IReadOnlyList<McpTodoLinkInput>? remove_links = null,
+        [Description("Clear all associations before removing/adding targets. Combine with add_links to replace the complete list. Cannot combine collection arguments with linked_paper_id or clear_linked_paper. Requires full writes.")] bool clear_links = false,
         CancellationToken cancellationToken = default)
         => _client.InvokeAsync(
             "update_todo",
-            OptionalUpdateParameters(paper_id, todo_id, text, done, order, linked_paper_id, clear_linked_paper),
+            OptionalUpdateParameters(paper_id, todo_id, text, done, order, linked_paper_id, clear_linked_paper, add_links, remove_links, clear_links),
             cancellationToken);
 
     [McpServerTool(
@@ -205,10 +208,15 @@ internal sealed partial class McpTools
         bool? done,
         int? order,
         string? linkedPaperId,
-        bool clearLinkedPaper = false)
+        bool clearLinkedPaper = false,
+        IReadOnlyList<McpTodoLinkInput>? addLinks = null,
+        IReadOnlyList<McpTodoLinkInput>? removeLinks = null,
+        bool clearLinks = false)
     {
         if (clearLinkedPaper && linkedPaperId != null)
             throw new ModelContextProtocol.McpException("linked_paper_id and clear_linked_paper cannot be used together.");
+        if ((linkedPaperId != null || clearLinkedPaper) && (addLinks != null || removeLinks != null || clearLinks))
+            throw new ModelContextProtocol.McpException("Legacy linked-paper arguments cannot be combined with collection link arguments.");
         var parameters = new Dictionary<string, object?>
         {
             ["paper_id"] = paperId,
@@ -231,6 +239,9 @@ internal sealed partial class McpTools
             // Preserve an explicit null at the internal JSON boundary; omitted still means no change.
             parameters["linked_paper_id"] = linkedPaperId;
         }
+        if (addLinks != null) parameters["add_links"] = addLinks;
+        if (removeLinks != null) parameters["remove_links"] = removeLinks;
+        if (clearLinks) parameters["clear_links"] = true;
         return parameters;
     }
 }
@@ -252,4 +263,15 @@ internal sealed record McpTodoInput
     [JsonPropertyName("linked_paper_id")]
     [Description("Optional PaperTodo paper ID to link from the new todo, such as a Note containing longer details.")]
     public string? LinkedPaperId { get; init; }
+}
+
+internal sealed record McpTodoLinkInput
+{
+    [JsonPropertyName("paper_id")]
+    [Description("An existing PaperTodo paper ID. Specify this OR path.")]
+    public string? PaperId { get; init; }
+
+    [JsonPropertyName("path")]
+    [Description("Absolute Windows file or folder path. Specify this OR paper_id.")]
+    public string? Path { get; init; }
 }

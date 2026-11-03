@@ -677,6 +677,8 @@ public sealed class PaperData
     public string Content { get; set; } = "";
 }
 
+public sealed record TodoQuickLaunchLink(string? PaperId, string? Path, bool? IsDirectory = null);
+
 public sealed class PaperItem
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -697,6 +699,61 @@ public sealed class PaperItem
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? LinkedPathIsDirectory { get; private set; }
 
+    // The first target keeps the legacy wire fields. Remaining targets extend the same
+    // ordered list so existing data and scalar plugin/MCP contracts remain readable.
+    [JsonInclude]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<TodoQuickLaunchLink>? AdditionalQuickLaunchLinks { get; private set; }
+
+    public IEnumerable<TodoQuickLaunchLink> GetQuickLaunchLinks()
+    {
+        if (!string.IsNullOrWhiteSpace(LinkedPaperId))
+            yield return new(LinkedPaperId, null);
+        if (!string.IsNullOrWhiteSpace(LinkedPath))
+            yield return new(null, LinkedPath, LinkedPathIsDirectory);
+        if (AdditionalQuickLaunchLinks != null)
+            foreach (var link in AdditionalQuickLaunchLinks)
+                if (link != null) yield return link;
+    }
+
+    [JsonIgnore]
+    public IEnumerable<string> LinkedPaperIds => GetQuickLaunchLinks()
+        .Where(link => !string.IsNullOrWhiteSpace(link.PaperId)).Select(link => link.PaperId!);
+
+    public bool HasQuickLaunchLink(TodoQuickLaunchLink target) => GetQuickLaunchLinks().Any(link =>
+        target.PaperId != null
+            ? string.Equals(link.PaperId, target.PaperId, StringComparison.Ordinal)
+            : link.PaperId == null && string.Equals(link.Path, target.Path, StringComparison.OrdinalIgnoreCase));
+
+    public void AddQuickLaunchLink(TodoQuickLaunchLink target) =>
+        RestoreQuickLaunchLinks(GetQuickLaunchLinks().Append(target).ToArray());
+
+    public void RemoveQuickLaunchLink(TodoQuickLaunchLink target) =>
+        RestoreQuickLaunchLinks(GetQuickLaunchLinks().Where(link => target.PaperId != null
+            ? !string.Equals(link.PaperId, target.PaperId, StringComparison.Ordinal)
+            : link.PaperId != null || !string.Equals(link.Path, target.Path, StringComparison.OrdinalIgnoreCase)).ToArray());
+
+    internal void RestoreQuickLaunchLinks(IEnumerable<TodoQuickLaunchLink> targets)
+    {
+        var normalized = new List<TodoQuickLaunchLink>();
+        foreach (var target in targets)
+        {
+            var paper = NormalizeQuickLaunchValue(target.PaperId);
+            var path = paper == null ? NormalizeQuickLaunchValue(target.Path) : null;
+            if (paper == null && path == null) continue;
+            var link = new TodoQuickLaunchLink(paper, path, path == null ? null : target.IsDirectory);
+            if (normalized.Any(existing => paper != null ? existing.PaperId == paper :
+                existing.PaperId == null && string.Equals(existing.Path, path, StringComparison.OrdinalIgnoreCase))) continue;
+            normalized.Add(link);
+        }
+        ClearQuickLaunch();
+        if (normalized.Count == 0) return;
+        LinkedPaperId = normalized[0].PaperId;
+        LinkedPath = normalized[0].Path;
+        LinkedPathIsDirectory = normalized[0].IsDirectory;
+        if (normalized.Count > 1) AdditionalQuickLaunchLinks = normalized.Skip(1).ToList();
+    }
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTimeOffset? ReminderAt { get; set; }
 
@@ -705,39 +762,23 @@ public sealed class PaperItem
 
     public void LinkPaper(string? paperId)
     {
+        ClearQuickLaunch();
         LinkedPaperId = NormalizeQuickLaunchValue(paperId);
-        LinkedPath = null;
-        LinkedPathIsDirectory = null;
     }
 
     public void LinkPath(string? path, bool? isDirectory = null)
     {
+        ClearQuickLaunch();
         LinkedPath = NormalizeQuickLaunchValue(path);
         LinkedPathIsDirectory = LinkedPath == null ? null : isDirectory;
-        LinkedPaperId = null;
     }
 
     public void ClearQuickLaunch()
     {
+        AdditionalQuickLaunchLinks = null;
         LinkedPaperId = null;
         LinkedPath = null;
         LinkedPathIsDirectory = null;
-    }
-
-    internal void RestoreQuickLaunch(string? paperId, string? path, bool? pathIsDirectory = null)
-    {
-        var normalizedPaperId = NormalizeQuickLaunchValue(paperId);
-        if (normalizedPaperId != null)
-        {
-            LinkedPaperId = normalizedPaperId;
-            LinkedPath = null;
-            LinkedPathIsDirectory = null;
-            return;
-        }
-
-        LinkedPaperId = null;
-        LinkedPath = NormalizeQuickLaunchValue(path);
-        LinkedPathIsDirectory = LinkedPath == null ? null : pathIsDirectory;
     }
 
     private static string? NormalizeQuickLaunchValue(string? value)

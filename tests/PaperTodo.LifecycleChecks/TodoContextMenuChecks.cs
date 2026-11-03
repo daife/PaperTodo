@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Text.Json;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -31,13 +32,16 @@ internal static class TodoContextMenuChecks
         state.ShowTodoBottomBar = true;
         var path = Path.Combine(AppContext.BaseDirectory, "context-menu-target.txt");
         File.WriteAllText(path, "isolated context-menu target");
-        var items = new[] { "mouse", "keyboard", "apps", "path", "paper", "reminder", "done" }
+        var items = new[] { "mouse", "keyboard", "apps", "path", "paper", "reminder", "done", "multi" }
             .Select((id, index) => new PaperItem { Id = id, Text = "Todo " + id, Order = index })
             .ToList();
         items[3].LinkPath(path, isDirectory: false);
         items[4].LinkPaper(LinkedPaperId);
         items[5].ReminderAt = DateTimeOffset.Now.AddDays(2);
         items[6].Done = true;
+        items[7].LinkPaper(LinkedPaperId);
+        items[7].AddQuickLaunchLink(new(null, path, false));
+        items[7].AddQuickLaunchLink(new(null, AppContext.BaseDirectory, true));
         var area = SystemParameters.WorkArea;
         state.Papers.Add(new PaperData
         {
@@ -53,6 +57,98 @@ internal static class TodoContextMenuChecks
         });
     }
 
+    internal static async Task RunMultiLinks(AppController controller, IReadOnlyDictionary<string, PaperWindow> windows)
+    {
+        var window = windows[PaperId];
+        var paper = controller.State.Papers.Single(paper => paper.Id == PaperId);
+        await Flush();
+        var rows = (List<Border>)Part(window, "_todoRows");
+        var multiButton = ((Grid)rows.Single(row => row.Tag as string == "multi").Child).Children.OfType<Border>()
+            .Single(border => Grid.GetColumn(border) == 2);
+        Require(((TextBlock)multiButton.Child).Text == "▾", "multiple targets did not show an expand glyph");
+        multiButton.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+            { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+        await Flush();
+        var menu = ThemedMenus(window).Single(menu => menu.IsOpen);
+        Require(menu.Items.OfType<MenuItem>().Count() == 3,
+            "links panel did not list every paper, file and folder");
+        Require(menu.Template != null && menu.PlacementTarget == multiButton,
+            "links panel did not use the themed menu at the expand button");
+        menu.IsOpen = false;
+        await Flush();
+        var editors = (Dictionary<string, TodoTextBox>)Part(window, "_todoEditors");
+        LifecycleInput.Focus(window, editors["multi"]);
+        LifecycleInput.KeyChord(0x5D);
+        await Until(() => editors["multi"].ContextMenu!.IsOpen, "multiple links context menu");
+        menu = editors["multi"].ContextMenu!;
+        var linksMenu = Item(menu, Strings.Get("MenuTodoLinks"));
+        Require(linksMenu.Items.Count == 3, "context menu lost linked targets");
+        var linkedEntry = linksMenu.Items.OfType<MenuItem>().First();
+        var unlink = linkedEntry.Items.OfType<MenuItem>().Single(entry => Header(entry) == Strings.Get("MenuUnlinkPaper"));
+        menu.IsOpen = false;
+        await Flush();
+        unlink.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        await Flush();
+        var multi = paper.Items.Single(item => item.Id == "multi");
+        Require(multi.GetQuickLaunchLinks().Count() == 2 && !multi.LinkedPaperIds.Any(),
+            "unlinking one target removed unrelated links");
+        Require(!controller.State.Papers.Single(paper => paper.Id == LinkedPaperId).IsVisible,
+            "unlink bubbled into the parent open action");
+        var beforeBatch = multi.GetQuickLaunchLinks().ToArray();
+        var undo = (List<List<PaperItem>>)Part(window, "_undoStack");
+        var undoCount = undo.Count;
+        typeof(PaperWindow).GetMethod("AddTodoLinks", Private)!.Invoke(window,
+            [multi, new TodoQuickLaunchLink[] { new(null, Path.Combine(AppContext.BaseDirectory, "batch-a.txt"), false),
+                new(null, Path.Combine(AppContext.BaseDirectory, "batch-b.txt"), false) }]);
+        Require(undo.Count == undoCount + 1 && multi.GetQuickLaunchLinks().Count() == 4,
+            "batch linking did not form one history step");
+        typeof(PaperWindow).GetMethod("Undo", Private)!.Invoke(window, null);
+        multi = paper.Items.Single(item => item.Id == "multi");
+        Require(multi.GetQuickLaunchLinks().SequenceEqual(beforeBatch), "one undo did not remove the entire batch");
+        var mcp = new McpCommandService(controller, controller.PaperCommands);
+        controller.State.McpEnabled = true;
+        controller.State.McpAllowFullWrites = false;
+        object? Call(object parameters) => mcp.Execute(JsonSerializer.SerializeToElement(new { method = "update_todo", @params = parameters }));
+        void Denied(object parameters, string code)
+        {
+            var before = multi.GetQuickLaunchLinks().ToArray();
+            try { Call(parameters); throw new InvalidOperationException("MCP link update unexpectedly succeeded"); }
+            catch (McpApiException ex) { Require(ex.Code == code, "MCP link update reported " + ex.Code); }
+            Require(multi.GetQuickLaunchLinks().SequenceEqual(before), "rejected MCP update changed links");
+        }
+        var file = Path.Combine(AppContext.BaseDirectory, "context-menu-target.txt");
+        var mixed = new { paper_id = PaperId, todo_id = "multi", add_links = new object[] {
+            new { paper_id = LinkedPaperId }, new { path = file }, new { path = AppContext.BaseDirectory } } };
+        Denied(mixed, "full_writes_disabled");
+        controller.State.McpAllowFullWrites = true;
+        Call(mixed);
+        Require(multi.GetQuickLaunchLinks().Count() == 3 && multi.LinkedPaperIds.Single() == LinkedPaperId,
+            "MCP did not append mixed targets and deduplicate existing paths");
+        Call(mixed);
+        Require(multi.GetQuickLaunchLinks().Count() == 3, "repeating MCP add duplicated targets");
+        Denied(new { paper_id = PaperId, todo_id = "multi", add_links = new object[] { new { path = "relative.txt" } } }, "invalid_params");
+        Denied(new { paper_id = PaperId, todo_id = "multi", add_links = new object[] { new { paper_id = PaperId } } }, "self_link_not_allowed");
+        Denied(new { paper_id = PaperId, todo_id = "multi", linked_paper_id = LinkedPaperId, clear_links = true }, "invalid_params");
+        Denied(new { paper_id = PaperId, todo_id = "multi", add_links = new object[] { new { path = Path.Combine(AppContext.BaseDirectory, "not-found.txt") } } }, "path_not_found");
+        var missing = Path.Combine(AppContext.BaseDirectory, "temporary-link.txt");
+        File.WriteAllText(missing, "temporary linked file");
+        Call(new { paper_id = PaperId, todo_id = "multi", add_links = new object[] { new { path = missing } } });
+        File.Delete(missing);
+        Call(new { paper_id = PaperId, todo_id = "multi", remove_links = new object[] { new { path = missing } } });
+        Require(multi.GetQuickLaunchLinks().Count() == 3, "MCP could not unlink a missing file");
+        Call(new { paper_id = PaperId, todo_id = "multi", clear_links = true, add_links = new object[] {
+            new { path = file }, new { path = AppContext.BaseDirectory } } });
+        Require(multi.GetQuickLaunchLinks().Count() == 2 && !multi.LinkedPaperIds.Any(), "MCP clear-and-add was not atomic replacement");
+        window.LinkPaperToTodo("multi", LinkedPaperId);
+        controller.PaperCommands.DeletePaper(LinkedPaperId, PaperOperationContext.Mcp());
+        Require(multi.GetQuickLaunchLinks().Count() == 2 && multi.GetQuickLaunchLinks().All(link => link.Path != null),
+            "deleting a secondary paper target removed unrelated paths");
+        typeof(PaperWindow).GetMethod("Undo", Private)!.Invoke(window, null);
+        Require(paper.Items.Single(item => item.Id == "multi").LinkedPaperIds.All(id => id != LinkedPaperId),
+            "undo resurrected a deleted paper reference");
+        Console.WriteLine("PASS multiple Todo links: rendered panel, context unlink, secondary-paper deletion and history pruning");
+    }
+
     internal static async Task Run(AppController controller, IReadOnlyDictionary<string, PaperWindow> windows)
     {
         var window = windows[PaperId];
@@ -62,7 +158,7 @@ internal static class TodoContextMenuChecks
         await Flush();
         LifecycleInput.Focus(window, editors["mouse"]);
         await Flush();
-        Require(rows.Count == 7 && rows.All(row => row.ActualHeight > 0), "menu fixture rows were not laid out");
+        Require(rows.Count == 8 && rows.All(row => row.ActualHeight > 0), "menu fixture rows were not laid out");
 
         var owners = rows.SelectMany(Descendants).OfType<FrameworkElement>()
             .Where(element => element.ContextMenu != null).ToArray();

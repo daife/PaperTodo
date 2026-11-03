@@ -104,6 +104,8 @@ public sealed record PaperSnapshot(
     bool AlwaysOnTop,
     string BodyProviderId);
 
+public sealed record TodoLinkSnapshot(string? PaperId, string? Path, bool? IsDirectory);
+
 public sealed record TodoSnapshot(
     string PaperId,
     string PaperTitle,
@@ -120,6 +122,8 @@ public sealed record TodoSnapshot(
     /// host cannot classify it; true means directory and false means file.
     /// </summary>
     public bool? LinkedPathIsDirectory { get; init; }
+
+    public IReadOnlyList<TodoLinkSnapshot> Links { get; init; } = Array.Empty<TodoLinkSnapshot>();
 }
 
 public sealed record NoteSnapshot(
@@ -205,6 +209,12 @@ public sealed record AppendTodosRequest
     public IReadOnlyList<TodoCreateItem> Todos { get; init; } = [];
 }
 
+public sealed record TodoLinkInput
+{
+    public string? PaperId { get; init; }
+    public string? Path { get; init; }
+}
+
 public sealed record UpdateTodoRequest
 {
     public string PaperId { get; init; } = "";
@@ -214,6 +224,9 @@ public sealed record UpdateTodoRequest
     public int? Order { get; init; }
     public bool UpdateLinkedPaper { get; init; }
     public string? LinkedPaperId { get; init; }
+    public IReadOnlyList<TodoLinkInput>? AddLinks { get; init; }
+    public IReadOnlyList<TodoLinkInput>? RemoveLinks { get; init; }
+    public bool ClearLinks { get; init; }
 }
 
 public sealed record SetTodoReminderRequest

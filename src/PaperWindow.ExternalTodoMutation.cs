@@ -51,13 +51,7 @@ public sealed partial class PaperWindow
         {
             foreach (var item in snapshot)
             {
-                if (string.Equals(
-                        item.LinkedPaperId,
-                        deletedPaperId,
-                        StringComparison.Ordinal))
-                {
-                    item.ClearQuickLaunch();
-                }
+                item.RemoveQuickLaunchLink(new(deletedPaperId, null));
             }
         }
     }

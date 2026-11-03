@@ -169,8 +169,7 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
     }
 
     private static bool HasLinkedTarget(PaperItem item) =>
-        !string.IsNullOrWhiteSpace(item.LinkedPaperId) ||
-        !string.IsNullOrWhiteSpace(item.LinkedPath);
+        item.GetQuickLaunchLinks().Any();
 }
 
 internal sealed record TodoEdgeCapsulePreviewSnapshot(
@@ -378,7 +377,11 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
         }
 
         string? linkedMarker = null;
-        if (!string.IsNullOrWhiteSpace(item.LinkedPaperId))
+        if (item.GetQuickLaunchLinks().Skip(1).Any())
+        {
+            linkedMarker = "▾";
+        }
+        else if (!string.IsNullOrWhiteSpace(item.LinkedPaperId))
         {
             linkedMarker = "↗";
         }

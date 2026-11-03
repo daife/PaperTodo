@@ -51,7 +51,9 @@ public sealed partial class AppController
             item.LinkedPath,
             item.ReminderAt)
         {
-            LinkedPathIsDirectory = item.LinkedPathIsDirectory
+            LinkedPathIsDirectory = item.LinkedPathIsDirectory,
+            Links = item.GetQuickLaunchLinks().Select(link => new TodoLinkSnapshot(
+                link.PaperId, link.Path, link.IsDirectory)).ToArray()
         };
 
     internal NoteSnapshot CaptureNoteSnapshot(PaperData paper)

@@ -1542,4 +1542,7 @@ papertodo と PaperTodo_Bold（.ttf/.otf）の両方を置いてください。<
   <data name="TopBarExternalEditor" xml:space="preserve">
     <value>外部エディターで開く</value>
   </data>
+  <data name="MenuTodoLinks" xml:space="preserve">
+    <value>リンク項目</value>
+  </data>
 </root>

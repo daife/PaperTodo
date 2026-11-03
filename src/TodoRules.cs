@@ -11,15 +11,13 @@ internal static class TodoRules
         item.Done ||
         item.ReminderAt.HasValue ||
         item.ReminderTriggered ||
-        !string.IsNullOrWhiteSpace(item.LinkedPaperId) ||
-        !string.IsNullOrWhiteSpace(item.LinkedPath);
+        item.GetQuickLaunchLinks().Any();
 
     public static bool HasNonTextContent(PaperItem item) =>
         item.Done ||
         item.ReminderAt.HasValue ||
         item.ReminderTriggered ||
-        !string.IsNullOrWhiteSpace(item.LinkedPaperId) ||
-        !string.IsNullOrWhiteSpace(item.LinkedPath);
+        item.GetQuickLaunchLinks().Any();
 
     public static bool IsPlaceholder(PaperItem item) => !HasMeaningfulContent(item);
 
@@ -34,7 +32,7 @@ internal static class TodoRules
             ReminderAt = item.ReminderAt,
             ReminderTriggered = item.ReminderTriggered
         };
-        clone.RestoreQuickLaunch(item.LinkedPaperId, item.LinkedPath, item.LinkedPathIsDirectory);
+        clone.RestoreQuickLaunchLinks(item.GetQuickLaunchLinks());
         return clone;
     }
 

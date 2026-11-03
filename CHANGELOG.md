@@ -41,6 +41,8 @@ This log is written for general and power users alike. It focuses on user-facing
 
 #### Todos & Notes
 
+- **Multiple links per todo**: Associate a todo with multiple papers, files and folders without replacing existing links, including dropping several files or folders at once. One target opens directly; multiple targets show an expand button with a menu of linked items. Individual targets can be unlinked from the right-click menu. MCP and Native/Web plugins can read the full list and append, remove or clear mixed target types in one update.
+
 - **Todo bottom-bar toggle**: The bottom quick-add bar is visible by default but can be turned off. Hiding it also disables deleting todos by dragging them into the trash.
 - **Reorder selected todos as a group**: Move multiple selected todos together while preserving their relative order. Dragging near the top or bottom of the list scrolls smoothly, even while the trash preview is visible. Todos are deleted only when the pointer is released over the trash.
 - **Multiline and collapsible todos**: `Shift+Enter` inserts a line break within the current todo; `Enter` still creates a new item. When a todo occupies more than four displayed lines, an arrow above the drag grip lets you collapse it to two lines or expand it again. The collapsed second line ends with an ellipsis; editing temporarily reveals the full text. Searching for text hidden by the fold highlights the todo and its expand arrow without automatically expanding it.

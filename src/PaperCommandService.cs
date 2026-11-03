@@ -1,3 +1,4 @@
+using System.IO;
 using PaperTodo.Plugin;
 
 namespace PaperTodo;
@@ -217,11 +218,12 @@ internal sealed partial class PaperCommandService
         if (request.Text == null &&
             !request.Done.HasValue &&
             !request.Order.HasValue &&
-            !request.UpdateLinkedPaper)
+            !request.UpdateLinkedPaper &&
+            request.AddLinks == null && request.RemoveLinks == null && !request.ClearLinks)
         {
             throw Error(
                 "invalid_params",
-                "Provide text, done, order and/or updateLinkedPaper.");
+                "Provide text, done, order or a link update.");
         }
 
         var paper = RequirePaper(
@@ -240,7 +242,16 @@ internal sealed partial class PaperCommandService
                 "text");
         var textChanged = text != null &&
             !string.Equals(item.Text, text, StringComparison.Ordinal);
-        var originalLinkedPaperId = item.LinkedPaperId;
+        if (request.UpdateLinkedPaper && (request.AddLinks != null || request.RemoveLinks != null || request.ClearLinks))
+            throw Error("invalid_params", "Legacy linked-paper replacement cannot be combined with collection link updates.");
+        var addLinks = NormalizeTodoLinks(request.AddLinks, paper.Id, adding: true);
+        var removeLinks = NormalizeTodoLinks(request.RemoveLinks, paper.Id, adding: false);
+        var updatedLinks = TodoRules.Clone(item);
+        if (request.ClearLinks) updatedLinks.ClearQuickLaunch();
+        foreach (var link in removeLinks) updatedLinks.RemoveQuickLaunchLink(link);
+        foreach (var link in addLinks) updatedLinks.AddQuickLaunchLink(link);
+        var collectionLinksChanged = !item.GetQuickLaunchLinks().SequenceEqual(updatedLinks.GetQuickLaunchLinks());
+        var originalLinkedPaperIds = item.LinkedPaperIds.ToArray();
         var linkedPaperId = NormalizeLinkedPaperUpdate(request);
         var doneChanged = request.Done.HasValue &&
             request.Done.Value != item.Done;
@@ -258,12 +269,13 @@ internal sealed partial class PaperCommandService
                  linkedPaperId,
                  StringComparison.Ordinal) ||
              item.LinkedPath != null ||
-             item.LinkedPathIsDirectory.HasValue);
+             item.LinkedPathIsDirectory.HasValue ||
+             item.GetQuickLaunchLinks().Count() > 1);
 
         if (!textChanged &&
             !doneChanged &&
             !orderChanged &&
-            !linkedPaperChanged)
+            !linkedPaperChanged && !collectionLinksChanged)
         {
             return new TodoMutationResult(paper.Id, item.Id);
         }
@@ -294,6 +306,8 @@ internal sealed partial class PaperCommandService
             {
                 item.LinkPaper(linkedPaperId);
             }
+            if (collectionLinksChanged)
+                item.RestoreQuickLaunchLinks(updatedLinks.GetQuickLaunchLinks());
             if (requestedOrder.HasValue)
             {
                 MoveTodo(paper, item, requestedOrder.Value);
@@ -335,10 +349,10 @@ internal sealed partial class PaperCommandService
             _controller.RunExternalPostCommitUi(() =>
             {
                 _controller.RefreshExternalTodoPaper(paper);
-                if (linkedPaperChanged)
+                if (linkedPaperChanged || collectionLinksChanged)
                 {
                     _controller.RefreshCapsuleEligibilityForLinkedPapers(
-                        [originalLinkedPaperId, linkedPaperId]);
+                        originalLinkedPaperIds.Concat(item.LinkedPaperIds));
                 }
             });
         }
@@ -467,7 +481,7 @@ internal sealed partial class PaperCommandService
         var item = RequireTodo(
             paper,
             RequiredId(request.TodoId, "todoId"));
-        var originalLinkedPaperId = item.LinkedPaperId;
+        var originalLinkedPaperIds = item.LinkedPaperIds.ToArray();
         var snapshot = TodoPaperSnapshot.Capture(paper);
 
         using (_controller.SuppressPaperPluginEventScans())
@@ -490,10 +504,10 @@ internal sealed partial class PaperCommandService
             _controller.RunExternalPostCommitUi(() =>
             {
                 _controller.RefreshExternalTodoPaper(paper);
-                if (!string.IsNullOrWhiteSpace(originalLinkedPaperId))
+                if (originalLinkedPaperIds.Length > 0)
                 {
                     _controller.RefreshCapsuleEligibilityForLinkedPapers(
-                        [originalLinkedPaperId]);
+                        originalLinkedPaperIds);
                 }
             });
         }
@@ -514,14 +528,11 @@ internal sealed partial class PaperCommandService
         var affectedLinks = papers
             .Where(candidate => candidate.Type == PaperTypes.Todo)
             .SelectMany(candidate => candidate.Items
-                .Where(item => string.Equals(
-                    item.LinkedPaperId,
-                    paper.Id,
-                    StringComparison.Ordinal))
+                .Where(item => item.LinkedPaperIds.Contains(paper.Id, StringComparer.Ordinal))
                 .Select(item => (
                     PaperId: candidate.Id,
                     Item: item,
-                    Link: item.LinkedPaperId)))
+                    Links: item.GetQuickLaunchLinks().ToArray())))
             .ToList();
         var affectedTodoPaperIds = affectedLinks
             .Select(entry => entry.PaperId)
@@ -534,7 +545,7 @@ internal sealed partial class PaperCommandService
             papers.RemoveAt(originalIndex);
             foreach (var (_, item, _) in affectedLinks)
             {
-                item.ClearQuickLaunch();
+                item.RemoveQuickLaunchLink(new(paper.Id, null));
             }
 
             if (papers.Count == 0)
@@ -606,7 +617,7 @@ internal sealed partial class PaperCommandService
         IList<PaperData> papers,
         int originalIndex,
         PaperData paper,
-        IEnumerable<(string PaperId, PaperItem Item, string? Link)> affectedLinks,
+        IEnumerable<(string PaperId, PaperItem Item, TodoQuickLaunchLink[] Links)> affectedLinks,
         PaperData? replacement)
     {
         if (!papers.Contains(paper))
@@ -615,7 +626,7 @@ internal sealed partial class PaperCommandService
         }
         foreach (var (_, item, link) in affectedLinks)
         {
-            item.LinkPaper(link);
+            item.RestoreQuickLaunchLinks(link);
         }
         if (replacement != null)
         {
@@ -699,6 +710,39 @@ internal sealed partial class PaperCommandService
             ValidateReminder(input.ReminderAt);
             _ = NormalizeLinkedPaper(input.LinkedPaperId, sourcePaperId);
         }
+    }
+
+    private TodoQuickLaunchLink[] NormalizeTodoLinks(IReadOnlyList<TodoLinkInput>? inputs, string paperId, bool adding)
+    {
+        if (inputs == null) return [];
+        var links = new List<TodoQuickLaunchLink>();
+        foreach (var input in inputs)
+        {
+            if (input == null || (string.IsNullOrWhiteSpace(input.PaperId) == string.IsNullOrWhiteSpace(input.Path)))
+                throw Error("invalid_params", "Each link must specify exactly one paperId or path.");
+            if (!string.IsNullOrWhiteSpace(input.PaperId))
+            {
+                var id = adding ? NormalizeLinkedPaper(input.PaperId, paperId) : RequiredId(input.PaperId, "paperId");
+                links.Add(new(id, null));
+                continue;
+            }
+            string path;
+            try
+            {
+                if (!Path.IsPathFullyQualified(input.Path!))
+                    throw Error("invalid_params", "A linked path must be an absolute file or folder path.");
+                path = Path.GetFullPath(input.Path!);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                throw Error("invalid_params", "The linked path is invalid.");
+            }
+            var isDirectory = Directory.Exists(path);
+            if (adding && !isDirectory && !File.Exists(path))
+                throw Error("path_not_found", "The linked file or folder does not exist.");
+            links.Add(new(null, path, isDirectory));
+        }
+        return links.ToArray();
     }
 
     private string? NormalizeLinkedPaperUpdate(UpdateTodoRequest request) =>
@@ -944,9 +988,7 @@ internal sealed partial class PaperCommandService
         string Text,
         bool Done,
         int Order,
-        string? LinkedPaperId,
-        string? LinkedPath,
-        bool? LinkedPathIsDirectory,
+        TodoQuickLaunchLink[] Links,
         DateTimeOffset? ReminderAt,
         bool ReminderTriggered)
     {
@@ -956,9 +998,7 @@ internal sealed partial class PaperCommandService
                 item.Text,
                 item.Done,
                 item.Order,
-                item.LinkedPaperId,
-                item.LinkedPath,
-                item.LinkedPathIsDirectory,
+                item.GetQuickLaunchLinks().ToArray(),
                 item.ReminderAt,
                 item.ReminderTriggered);
 
@@ -973,10 +1013,7 @@ internal sealed partial class PaperCommandService
                 ReminderAt = ReminderAt,
                 ReminderTriggered = ReminderTriggered
             };
-            copy.RestoreQuickLaunch(
-                LinkedPaperId,
-                LinkedPath,
-                LinkedPathIsDirectory);
+            copy.RestoreQuickLaunchLinks(Links);
             return copy;
         }
 
@@ -985,10 +1022,7 @@ internal sealed partial class PaperCommandService
             Item.Text = Text;
             Item.Done = Done;
             Item.Order = Order;
-            Item.RestoreQuickLaunch(
-                LinkedPaperId,
-                LinkedPath,
-                LinkedPathIsDirectory);
+            Item.RestoreQuickLaunchLinks(Links);
             Item.ReminderAt = ReminderAt;
             Item.ReminderTriggered = ReminderTriggered;
         }

@@ -1542,4 +1542,7 @@ papertodo와 PaperTodo_Bold(.ttf/.otf)를 함께 두세요.</value>
   <data name="TopBarExternalEditor" xml:space="preserve">
     <value>외부 편집기로 열기</value>
   </data>
+  <data name="MenuTodoLinks" xml:space="preserve">
+    <value>연결 항목</value>
+  </data>
 </root>

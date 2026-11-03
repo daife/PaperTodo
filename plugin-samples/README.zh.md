@@ -35,6 +35,8 @@ MinimumSupportedApiVersion <= plugin.apiVersion <= CurrentApiVersion
 
 > **信任边界：PaperTodo 不为插件提供安全沙箱。** Native 与 Web 插件都应视为可信代码，只安装可信来源的插件。
 
+待办快照通过 `Links`（Web JSON 为 `links`）返回完整有序关联列表，每项包含 `PaperId`、`Path` 和 `IsDirectory`。旧 `LinkedPaperId` / `LinkedPath` 字段描述首个关联；现有标量纸片关联更新请求仍替换整组关联。
+
 ## 1. 快速开始
 
 PaperTodo 支持两种插件：
@@ -540,7 +542,7 @@ List 返回数组。每项包含稳定的 `id`、`category`、本地化 `title`�
 
 三种入口共用一个服务。核心设置同步通过 `StateStore` 保存，保存失败恢复原值及联动状态；提交成功后再刷新对应界面/Runtime。Windows 启动项、背景偏好沿用各自的持久化 owner。错误包括 `setting_not_found`、`invalid_setting_value`、`setting_dependency`、`settings_busy`、`setting_read_only`、`shortcut_conflict`、`save_failed`。已提交的数据不会因后续界面刷新异常被误报为写入失败。
 
-待办关联沿用 Workspace 更新请求：`UpdateLinkedPaper=true`、`LinkedPaperId=null` 表示解绑。MCP 增加 `update_todo(clear_linked_paper=true)`，与非空 `linked_paper_id` 互斥；两者都省略表示不改关联。准备为长待办创建详细 Note 前，应先查询 `todo.paper_links`；关闭或未知时跳过该方案，除非用户明确要求先改设置。
+待办可以关联多个纸片、文件和文件夹。Workspace `UpdateTodoRequest` 提供 `AddLinks`、`RemoveLinks`（`TodoLinkInput` 列表，每项只指定 `PaperId` 或绝对 `Path`）和 `ClearLinks`，Web 使用 `addLinks`、`removeLinks`、`clearLinks`。MCP 使用 `update_todo(add_links=[{"paper_id":"note-id"},{"path":"C:\\Work"}])`、`remove_links` 和 `clear_links`，这些操作需要完整写入权限。追加自动去重，新增路径必须存在，已不存在的路径仍可解绑；同一次请求先清空、再移除、最后追加，只形成一次提交和撤销操作。`clear_links=true` 配合 `add_links` 可替换整组关联。旧 Workspace `UpdateLinkedPaper` 与 MCP `linked_paper_id` / `clear_linked_paper` 仍替换／清空整组关联，不可与集合参数混用；省略全部关联参数则保留原有关联。准备为长待办创建详细 Note 前，应先查询 `todo.paper_links`；关闭或未知时跳过该方案，除非用户明确要求先改设置。
 
 
 ## 6. Workspace 权限与数据 API

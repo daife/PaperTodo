@@ -136,7 +136,7 @@ public sealed partial class AppController
         if (paper.Type == PaperTypes.Todo)
         {
             RefreshCapsuleEligibilityForLinkedPapers(
-                paper.Items.Select(item => item.LinkedPaperId));
+                paper.Items.SelectMany(item => item.LinkedPaperIds));
         }
     }
 
@@ -148,7 +148,7 @@ public sealed partial class AppController
         }
         NotifyTodoReminderCollectionChanged();
         RefreshCapsuleEligibilityForLinkedPapers(
-            paper.Items.Select(item => item.LinkedPaperId));
+            paper.Items.SelectMany(item => item.LinkedPaperIds));
     }
 
     internal void RefreshTodoPapersForExternalLinkMutation(

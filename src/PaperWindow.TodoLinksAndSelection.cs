@@ -929,32 +929,14 @@ public sealed partial class PaperWindow
                 try
                 {
                     var paths = GetTodoFileDropPaths(e.Data);
-                    if (paths.Length != 1)
+                    var targets = paths.Select(path => Path.GetFullPath(path))
+                        .Select(path => new TodoQuickLaunchLink(null, path, Directory.Exists(path))).ToArray();
+                    foreach (var target in targets)
                     {
-                        MessageBox.Show(
-                            this,
-                            Strings.Get("LinkedPathSingleDropMessage"),
-                            Strings.Get("LinkedPathDropFailureTitle"),
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Information);
-                        return;
+                        if (!File.Exists(target.Path) && !Directory.Exists(target.Path))
+                            throw new IOException(Strings.Format("LinkedPathMissingMessage", target.Path!));
                     }
-
-                    var path = Path.GetFullPath(paths[0]);
-                    var isFile = File.Exists(path);
-                    var isDirectory = !isFile && Directory.Exists(path);
-                    if (!isFile && !isDirectory)
-                    {
-                        MessageBox.Show(
-                            this,
-                            Strings.Format("LinkedPathMissingMessage", path),
-                            Strings.Get("LinkedPathOpenFailureTitle"),
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Warning);
-                        return;
-                    }
-
-                    LinkPathToTodo(item, path, isDirectory);
+                    AddTodoLinks(item, targets);
                     e.Effects = DragDropEffects.Link;
                 }
                 catch (Exception ex)
@@ -984,7 +966,7 @@ public sealed partial class PaperWindow
         }
 
         var paths = GetTodoFileDropPaths(e.Data);
-        if (paths.Length == 1)
+        if (paths.Length > 0)
         {
             e.Effects = DragDropEffects.Link;
             row.Background = PaperLinkTargetBgBrush;
@@ -1035,24 +1017,6 @@ public sealed partial class PaperWindow
         UpdateTodoRowBackground(row);
     }
 
-    private void LinkPathToTodo(PaperItem item, string path, bool isDirectory)
-    {
-        if (string.Equals(item.LinkedPath, path, StringComparison.OrdinalIgnoreCase) &&
-            string.IsNullOrWhiteSpace(item.LinkedPaperId) &&
-            item.LinkedPathIsDirectory == isDirectory)
-        {
-            return;
-        }
-
-        var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
-        var previousItems = CloneItems(_paper.Items);
-        PushUndoSnapshot();
-        item.LinkPath(path, isDirectory);
-        _controller.MarkDirty();
-        ReconcileTodoRows([item.Id], focusedId);
-        RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
-    }
-
     private void UnlinkPathFromTodoItem(PaperItem item)
     {
         if (string.IsNullOrWhiteSpace(item.LinkedPath))
@@ -1062,7 +1026,7 @@ public sealed partial class PaperWindow
 
         var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
         PushUndoSnapshot();
-        item.ClearQuickLaunch();
+        item.RemoveQuickLaunchLink(new(null, item.LinkedPath));
         _controller.MarkDirty();
         ReconcileTodoRows([item.Id], focusedId);
     }
@@ -1254,9 +1218,10 @@ public sealed partial class PaperWindow
         }
     }
 
-    private void OpenTodoLinkedPath(PaperItem item)
+    private void OpenTodoLinkedPath(PaperItem item) => OpenTodoLinkedPath(item.LinkedPath, item.Id);
+
+    private void OpenTodoLinkedPath(string? path, string? itemId = null)
     {
-        var path = item.LinkedPath;
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
@@ -1270,18 +1235,18 @@ public sealed partial class PaperWindow
                 Strings.Get("LinkedPathOpenFailureTitle"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
-            ReconcileTodoRows(
-                [item.Id],
-                CurrentFocusedTodoItemId() ?? item.Id);
+            if (itemId != null)
+                ReconcileTodoRows([itemId], CurrentFocusedTodoItemId() ?? itemId);
             return;
         }
 
         OpenShellPath(path);
     }
 
-    private void OpenTodoLinkedPathLocation(PaperItem item)
+    private void OpenTodoLinkedPathLocation(PaperItem item) => OpenTodoLinkedPathLocation(item.LinkedPath);
+
+    private void OpenTodoLinkedPathLocation(string? path)
     {
-        var path = item.LinkedPath;
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
@@ -1365,10 +1330,7 @@ public sealed partial class PaperWindow
         }
 
         var affectedItemIds = _paper.Items
-            .Where(item => string.Equals(
-                item.LinkedPaperId,
-                paperId,
-                StringComparison.Ordinal))
+            .Where(item => item.LinkedPaperIds.Contains(paperId, StringComparer.Ordinal))
             .Select(item => item.Id)
             .ToArray();
         if (affectedItemIds.Length == 0)

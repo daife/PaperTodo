@@ -14,6 +14,7 @@ internal static partial class Program
         {
             var host = Assembly.Load("PaperTodo");
             var abstractions = Assembly.Load("PaperTodo.Plugin.Abstractions");
+            CheckTodoMultiLinks();
             CheckShortcutReservations(host);
             CheckShortcutValidation(host);
             CheckCapabilityNormalization(host);

@@ -159,6 +159,8 @@ PaperTodo 不提供插件热重载入口。插件 manifest、DLL、Web body/mini
 
 `AppState` 是核心持久化根；`PaperData` 是单纸片模型；Todo 行使用 `PaperItem`。
 
+待办的快捷关联由 `PaperItem` 管理为有序、去重的纸片／路径集合。持久化保留首项的 `linkedNoteId` / `linkedPath` / `linkedPathIsDirectory` 旧字段，其余项写入可选 `additionalQuickLaunchLinks`；业务通过 `GetQuickLaunchLinks()` 和集合 mutation 访问完整列表，撤销、外部写入回滚、启动校验和删除纸片清理均覆盖全部关联。普通拖入追加目标，一次多文件拖入形成一次撤销操作；单项直接打开，多项使用宿主的菜单面板。插件 `TodoSnapshot.Links` 与 MCP `links` 返回完整列表，旧标量读取字段继续表示首项，外部集合写入通过 `PaperCommandService.UpdateTodo` 的 `AddLinks` / `RemoveLinks` / `ClearLinks` 统一校验、去重和原子提交，MCP 对应 `add_links` / `remove_links` / `clear_links` 并要求完整写入权限；既有外部标量关联写入仍替换整组目标，且不能与集合写入参数混用。
+
 删除、隐藏、折叠是不同语义：
 
 - 删除从 `State.Papers` 移除对象。

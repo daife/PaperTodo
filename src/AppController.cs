@@ -890,7 +890,7 @@ public sealed partial class AppController : IDisposable
 
             foreach (var item in sourcePaper.Items)
             {
-                if (string.Equals(item.LinkedPaperId, paperId, StringComparison.Ordinal))
+                if (item.LinkedPaperIds.Contains(paperId, StringComparer.Ordinal))
                 {
                     return true;
                 }
@@ -2029,12 +2029,12 @@ public sealed partial class AppController : IDisposable
         {
             foreach (var item in paper.Items)
             {
-                if (!string.Equals(item.LinkedPaperId, linkedPaperId, StringComparison.Ordinal))
+                if (!item.LinkedPaperIds.Contains(linkedPaperId, StringComparer.Ordinal))
                 {
                     continue;
                 }
 
-                item.ClearQuickLaunch();
+                item.RemoveQuickLaunchLink(new(linkedPaperId, null));
                 affectedPaperIds.Add(paper.Id);
             }
         }

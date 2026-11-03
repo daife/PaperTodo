@@ -759,17 +759,9 @@ public sealed class StateStore
         {
             foreach (var item in paper.Items)
             {
-                var linkedPaperId = item.LinkedPaperId;
-                if (string.IsNullOrWhiteSpace(linkedPaperId) ||
-                    !paperIds.Contains(linkedPaperId) ||
-                    string.Equals(linkedPaperId, paper.Id, StringComparison.Ordinal))
-                {
-                    item.LinkPath(item.LinkedPath, item.LinkedPathIsDirectory);
-                }
-                else
-                {
-                    item.LinkPaper(linkedPaperId);
-                }
+                item.RestoreQuickLaunchLinks(item.GetQuickLaunchLinks().Where(link =>
+                    link.PaperId == null || (paperIds.Contains(link.PaperId) &&
+                    !string.Equals(link.PaperId, paper.Id, StringComparison.Ordinal))).ToArray());
             }
         }
 
@@ -778,7 +770,7 @@ public sealed class StateStore
             var linkedPaperIds = state.Papers
                 .Where(p => p.Type == PaperTypes.Todo)
                 .SelectMany(p => p.Items)
-                .Select(item => item.LinkedPaperId)
+                .SelectMany(item => item.LinkedPaperIds)
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .ToHashSet(StringComparer.Ordinal);
 

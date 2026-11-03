@@ -234,6 +234,9 @@ internal static class TodoHistoryChecks
             ("done", null, item => item.Done = true),
             ("linked paper", null, item => item.LinkPaper("link-target")),
             ("linked path", null, item => item.LinkPath(AppContext.BaseDirectory, true)),
+            ("additional paper", item => item.LinkPath(AppContext.BaseDirectory, true), item => item.AddQuickLaunchLink(new("link-target", null))),
+            ("additional path", item => item.LinkPaper("link-target"), item => item.AddQuickLaunchLink(new(null, AppContext.BaseDirectory, true))),
+            ("remove first link", item => { item.LinkPaper("link-target"); item.AddQuickLaunchLink(new(null, AppContext.BaseDirectory, true)); }, item => item.RemoveQuickLaunchLink(new("link-target", null))),
             ("path kind", item => item.LinkPath(AppContext.BaseDirectory, true), item => item.LinkPath(AppContext.BaseDirectory, false)),
             ("reminder time", null, item => item.ReminderAt = reminder),
             ("reminder offset", item => item.ReminderAt = reminder, item => item.ReminderAt = reminder.ToOffset(TimeSpan.FromHours(8))),
@@ -667,7 +670,7 @@ internal static class TodoHistoryChecks
     private static void RequireItem(PaperItem actual, PaperItem expected, string operation) => Require(
         actual.Id == expected.Id && actual.Text == expected.Text && actual.Done == expected.Done && actual.Order == expected.Order &&
         actual.LinkedPaperId == expected.LinkedPaperId && actual.LinkedPath == expected.LinkedPath &&
-        actual.LinkedPathIsDirectory == expected.LinkedPathIsDirectory && actual.ReminderAt == expected.ReminderAt &&
+        actual.GetQuickLaunchLinks().SequenceEqual(expected.GetQuickLaunchLinks()) && actual.ReminderAt == expected.ReminderAt &&
         actual.ReminderAt?.Offset == expected.ReminderAt?.Offset && actual.ReminderTriggered == expected.ReminderTriggered, operation);
 
     private static void RequireHistoryIsolation(PaperWindow window, PaperData paper) => Require(
