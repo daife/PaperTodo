@@ -14,6 +14,7 @@ internal static partial class Program
         new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var failures = 0;
         ClipboardImageChecks.Run(Check);
+        ClipboardImageChecks.RunFileDropChecks(Check);
         Check("Paper background image loading and layout", CheckPaperBackgroundToggle);
         Check("Full mode preserves quote source and undo history", () =>
         {

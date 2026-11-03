@@ -29,6 +29,7 @@ public sealed partial class MarkdownTextBox
     {
         if (sender is not MarkdownTextBox editor ||
             !editor.IsPreviewMode ||
+            HasFileDropData(e.Data) ||
             editor.CanInsertImagesFromDataObject(e.Data) ||
             !HasTextDropData(e.Data))
         {
@@ -43,6 +44,7 @@ public sealed partial class MarkdownTextBox
     {
         if (sender is not MarkdownTextBox editor ||
             !editor.IsPreviewMode ||
+            HasFileDropData(e.Data) ||
             editor.CanInsertImagesFromDataObject(e.Data) ||
             !HasTextDropData(e.Data) ||
             editor.ValidateTextDrop(e.Data))

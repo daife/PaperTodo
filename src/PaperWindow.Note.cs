@@ -531,7 +531,7 @@ public sealed partial class PaperWindow
         box.AllowDrop = true;
         box.PreviewDragOver += (_, e) =>
         {
-            if (!box.CanInsertImagesFromDataObject(e.Data))
+            if (!MarkdownTextBox.HasFileDropData(e.Data) && !box.CanInsertImagesFromDataObject(e.Data))
             {
                 if (!isPreviewing || !MarkdownTextBox.HasTextDropData(e.Data))
                 {
@@ -548,7 +548,7 @@ public sealed partial class PaperWindow
         };
         box.PreviewDrop += (_, e) =>
         {
-            if (!box.CanInsertImagesFromDataObject(e.Data))
+            if (!MarkdownTextBox.HasFileDropData(e.Data) && !box.CanInsertImagesFromDataObject(e.Data))
             {
                 if (!MarkdownTextBox.HasTextDropData(e.Data))
                 {
@@ -588,7 +588,18 @@ public sealed partial class PaperWindow
                 box.Select(dropCaret, 0);
             }
 
-            box.TryInsertImagesFromDataObject(e.Data);
+            try
+            {
+                if (!box.TryInsertFilesFromDataObject(e.Data))
+                    box.TryInsertImagesFromDataObject(e.Data);
+                e.Effects = DragDropEffects.Copy;
+            }
+            catch (Exception ex)
+            {
+                e.Effects = DragDropEffects.None;
+                MessageBox.Show(this, ex.Message, Strings.Get("LinkedPathDropFailureTitle"),
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
             e.Handled = true;
         };
 

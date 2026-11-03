@@ -41,6 +41,8 @@ This log is written for general and power users alike. It focuses on user-facing
 
 #### Todos & Notes
 
+- **Drop files and folders into notes**: Drag one or more files or folders into a note to insert clickable local links. Images still import and display in the note; mixed drops preserve their order and can be undone in one step. Linked files and folders remain at their original locations.
+
 - **Multiple links per todo**: Associate a todo with multiple papers, files and folders without replacing existing links, including dropping several files or folders at once. One target opens directly; multiple targets show an expand button with a menu of linked items. Individual targets can be unlinked from the right-click menu. MCP and Native/Web plugins can read the full list and append, remove or clear mixed target types in one update.
 
 - **Todo bottom-bar toggle**: The bottom quick-add bar is visible by default but can be turned off. Hiding it also disables deleting todos by dragging them into the trash.
