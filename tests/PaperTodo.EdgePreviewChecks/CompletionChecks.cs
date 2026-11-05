@@ -75,18 +75,29 @@ internal static partial class Program
                 window.Show(); var body = PublishedBody(viewport);
                 Require(viewport.IsHitTestVisible && body.Artifact.Drawing.IsFrozen, "one complete immutable result publishes");
                 Require(!PreviewText(body).Contains("第40行"), "off-budget text is never realized");
-                Require(!Elements(view).Any(e => e is ScrollViewer or ScrollBar), "no scrolling controls");
+                Require(!Elements(view).Any(e => e is ScrollViewer or ScrollBar), "scrolling preserves lightweight artifact surface");
                 Require(viewport.Children.OfType<TextBlock>().Single().Opacity == 1, "omitted tail is indicated");
                 var top = body.TranslatePoint(new Point(), viewport);
-                foreach (var delta in new[] { -120, 120 })
-                    body.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, delta)
-                    { RoutedEvent = Mouse.MouseWheelEvent });
+                viewport.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, -120)
+                { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                viewport.UpdateLayout();
+                Require(body.TranslatePoint(new Point(), viewport).Y < top.Y, "wheel scrolls overflowing note");
+                viewport.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, 120)
+                { RoutedEvent = Mouse.PreviewMouseWheelEvent });
                 body.BringIntoView(); Pump();
                 Require(body.TranslatePoint(new Point(), viewport) == top && paper.Content == source,
-                    "wheel and bring-into-view neither scroll nor edit the note");
+                    "wheel returns to top without editing note");
                 if (mode != MarkdownRenderModes.Off)
                 {
                     var link = body.Children.OfType<Button>().First();
+                    viewport.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, -12000)
+                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                    viewport.UpdateLayout();
+                    Require(!link.IsEnabled, "scrolled-away note links cannot consume input");
+                    viewport.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, 12000)
+                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                    viewport.UpdateLayout();
+                    Require(link.IsEnabled, "scrolling back restores visible note links");
                     Require(EdgeCapsulePreviewInteraction.GetConsumesPointer(link), "links retain host input routing");
                     link.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Require(opened == "https://example.com/", "link invokes the existing callback");

@@ -74,9 +74,9 @@ internal sealed class MarkdownPreviewArtifactSurface : Panel
 
 internal static partial class MarkdownEdgeCapsulePreviewRenderer
 {
-    // The whole card is capped at 410 DIPs. Preparing this much body is therefore sufficient for
-    // every current card height and lets one artifact survive a smaller host-height constraint.
-    internal const double ArtifactMaximumBodyHeight = 410;
+    // Source budgets bound the work; prepare all admitted content for local wheel scrolling.
+    // Finite formatter ceiling, sufficient even if each admitted character wraps to a line.
+    internal const double ArtifactMaximumBodyHeight = 1_000_000;
     internal static readonly Thickness ArtifactViewMargin = new(10, 9, 9, 10);
     internal static readonly Thickness ArtifactViewportMargin = new(1, 0, 2, 0);
 
@@ -340,7 +340,7 @@ internal static partial class MarkdownEdgeCapsulePreviewRenderer
             VisualTreeHelper.GetDpi(owner), TypographyStamp(owner)
         };
         var appearance = Appearance();
-        var plan = CaptureArtifactPlan(owner, content, viewport.Width, zoom) with { MaximumHeight = viewport.Height };
+        var plan = CaptureArtifactPlan(owner, content, viewport.Width, zoom);
         var changed = false;
         var observed = appearance.OfType<Freezable>().Where(value => !value.IsFrozen).Distinct().ToArray();
         EventHandler handler = (_, _) => changed = true;

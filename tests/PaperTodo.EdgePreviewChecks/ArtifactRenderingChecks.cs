@@ -22,11 +22,11 @@ internal static partial class Program
             var limit = Renderer.CaptureContent(new string('文', 6000), mode);
             Require(!limit.Truncated && Renderer.CaptureContent(new string('文', 6001), mode).Truncated, "strict 6000-character budget");
             var panel = new StackPanel();
-            Require(RenderForCheck(panel, new string('文', 6000), _ => { }, mode, new Size(150, 80)), "bounded layout reports its invisible tail");
+            Require(!RenderForCheck(panel, new string('文', 6000), _ => { }, mode, new Size(150, 80)), "all admitted text is prepared for scrolling");
             var surface = panel.Children.OfType<MarkdownPreviewArtifactSurface>().Single();
             panel.Measure(new Size(150, 80)); panel.Arrange(new Rect(0, 0, 150, 80));
             panel.InvalidateMeasure(); panel.UpdateLayout();
-            Require(PreviewText(surface).Length < 1000 && surface.Artifact.ContentHeight < 200, "cold formatter stops at the visible boundary");
+            Require(PreviewText(surface).Length >= 6000 && surface.Artifact.ContentHeight > 200, "cold formatter includes content below the card");
         }
         var code = "```\n" + string.Join('\n', Enumerable.Repeat("literal **code**", 40)) + "\n```";
         Require(!Renderer.CaptureContent(code, MarkdownRenderModes.Full).Truncated, "a fenced code block uses one block slot");

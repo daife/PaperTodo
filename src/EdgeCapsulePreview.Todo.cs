@@ -7,9 +7,8 @@ namespace PaperTodo;
 
 internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvider
 {
-    // Keep row creation bounded; totals still describe the complete model and the paper remains
-    // the place for browsing the full list.
-    internal const int MaximumRenderedItems = 12;
+    // Size the card from a bounded sample; the viewport can browse every todo.
+    internal const int SizeSampleItems = 12;
     internal const int MaximumItemCharacters = 512;
     internal const double LinkedTargetButtonSizeDip = 20;
 
@@ -27,7 +26,7 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
     public EdgeCapsulePreviewDescriptor Describe(EdgeCapsulePreviewContext context)
     {
         var snapshot = CaptureSnapshot(context.Paper);
-        var items = snapshot.Items;
+        var items = snapshot.Items.Take(SizeSampleItems).ToList();
         var body = string.Join(
             Environment.NewLine,
             items.Select(item => PreviewItemText(item.Text)));
@@ -54,7 +53,7 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
         var height = items.Count == 0
             ? 120
             : Math.Clamp(
-                62 + Math.Min(MaximumRenderedItems, estimatedLines) *
+                62 + Math.Min(SizeSampleItems, estimatedLines) *
                     AppTypography.Scale(28),
                 150,
                 EdgeCapsulePreviewSize.BuiltInMaximumHeightDip);
@@ -70,50 +69,10 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
 
     internal static TodoEdgeCapsulePreviewSnapshot CaptureSnapshot(PaperData paper)
     {
-        var selected = new List<PaperItem>(MaximumRenderedItems);
-        var total = 0;
-        var done = 0;
-        foreach (var item in paper.Items)
-        {
-            if (!TodoRules.HasMeaningfulContent(item))
-            {
-                continue;
-            }
-
-            total++;
-            if (item.Done)
-            {
-                done++;
-            }
-
-            // Keep only the stable first 12 items by Order. With a fixed-size insertion list this
-            // is one model pass, O(n * 12), and never sorts/materializes the complete todo model.
-            var insertionIndex = selected.Count;
-            for (var index = 0; index < selected.Count; index++)
-            {
-                if (item.Order < selected[index].Order)
-                {
-                    insertionIndex = index;
-                    break;
-                }
-            }
-            if (insertionIndex == selected.Count)
-            {
-                if (selected.Count < MaximumRenderedItems)
-                {
-                    selected.Add(item);
-                }
-                continue;
-            }
-
-            selected.Insert(insertionIndex, item);
-            if (selected.Count > MaximumRenderedItems)
-            {
-                selected.RemoveAt(MaximumRenderedItems);
-            }
-        }
-
-        return new TodoEdgeCapsulePreviewSnapshot(selected, total, done);
+        var selected = paper.Items.Where(TodoRules.HasMeaningfulContent)
+            .OrderBy(item => item.Order).ToList();
+        return new TodoEdgeCapsulePreviewSnapshot(selected, selected.Count,
+            selected.Count(item => item.Done));
     }
 
     internal static string PreviewItemText(string? value)
@@ -281,7 +240,6 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
             _rebuilding = false;
         }
 
-        _viewport.SetSourceTruncated(snapshot.Total > meaningful.Count);
     }
 
     private FrameworkElement BuildRow(PaperItem item)
@@ -455,18 +413,19 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
     }
 }
 
-// A fixed top excerpt, not a hidden ScrollViewer. No offset, keyboard scrolling, wheel scrolling
-// or BringIntoView scrolling exists; clipping also keeps off-card controls out of pointer hit tests.
+// Scroll only the content; the host retains ownership of card geometry and pointer bounds.
 internal sealed class TodoEdgeCapsulePreviewViewport : Panel
 {
     private readonly StackPanel _items;
     private readonly TextBlock _overflowIndicator;
     private readonly RectangleGeometry _itemsClip = new();
-    private bool _sourceTruncated;
+    private double _offset;
+    private double _maximumOffset;
 
     public TodoEdgeCapsulePreviewViewport(StackPanel items)
     {
         ClipToBounds = true;
+        Background = Brushes.Transparent;
         _items = items;
         _items.Clip = _itemsClip;
         _overflowIndicator = new TextBlock
@@ -482,12 +441,6 @@ internal sealed class TodoEdgeCapsulePreviewViewport : Panel
         Children.Add(_overflowIndicator);
     }
 
-    public void SetSourceTruncated(bool truncated)
-    {
-        _sourceTruncated = truncated;
-        InvalidateArrange();
-    }
-
     protected override Size MeasureOverride(Size availableSize)
     {
         var naturalSize = new Size(availableSize.Width, double.PositiveInfinity);
@@ -500,13 +453,23 @@ internal sealed class TodoEdgeCapsulePreviewViewport : Panel
 
     protected override Size ArrangeOverride(Size finalSize)
     {
-        var overflow = _sourceTruncated || _items.DesiredSize.Height > finalSize.Height;
+        var overflow = _items.DesiredSize.Height > finalSize.Height;
         var indicatorHeight = overflow ? Math.Min(finalSize.Height, _overflowIndicator.DesiredSize.Height) : 0;
         var visibleHeight = finalSize.Height - indicatorHeight;
-        _itemsClip.Rect = new Rect(0, 0, finalSize.Width, visibleHeight);
-        _items.Arrange(new Rect(0, 0, finalSize.Width, _items.DesiredSize.Height));
-        _overflowIndicator.Opacity = overflow ? 1 : 0;
+        _maximumOffset = Math.Max(0, _items.DesiredSize.Height - visibleHeight);
+        _offset = Math.Clamp(_offset, 0, _maximumOffset);
+        _itemsClip.Rect = new Rect(0, _offset, finalSize.Width, visibleHeight);
+        _items.Arrange(new Rect(0, -_offset, finalSize.Width, _items.DesiredSize.Height));
+        _overflowIndicator.Opacity = _offset < _maximumOffset ? 1 : 0;
         _overflowIndicator.Arrange(new Rect(0, visibleHeight, finalSize.Width, indicatorHeight));
         return finalSize;
+    }
+
+    protected override void OnPreviewMouseWheel(MouseWheelEventArgs e)
+    {
+        base.OnPreviewMouseWheel(e);
+        _offset = EdgePreviewScroll.Offset(_offset, _maximumOffset, ActualHeight, e.Delta);
+        InvalidateArrange();
+        e.Handled = true;
     }
 }

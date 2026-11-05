@@ -20,7 +20,7 @@ internal static partial class Program
             else if (args is ["--review-only"]) ReviewBoundaryChecks();
             else if (args.Length == 0)
             {
-                ArtifactSurfaceChecks(); ArtifactRenderingChecks(); SharedPreviewSemanticChecks.Run();
+                TodoScrollingChecks(); ArtifactSurfaceChecks(); ArtifactRenderingChecks(); SharedPreviewSemanticChecks.Run();
                 Checks(); ReviewBoundaryChecks(); PreloadChecks();
                 ReviewIntegrationChecks(); MarkdownWorkerChecks();
             }

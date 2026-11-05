@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Input;
 using System.Windows.Threading;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("PaperTodo.EdgePreviewChecks")]
@@ -136,6 +137,8 @@ internal sealed class MarkdownEdgeCapsulePreviewView : EdgeCapsuleLivePreviewVie
 internal sealed class MarkdownEdgeCapsulePreviewViewport : Panel
 {
     private MarkdownPreviewArtifactSurface? _body;
+    private double _offset;
+    private double _maximumOffset;
     private readonly TextBlock _overflowIndicator;
     private readonly RectangleGeometry _bodyClip = new();
     private MarkdownEdgeCapsulePreviewRenderer.PreviewContent? _content;
@@ -152,6 +155,7 @@ internal sealed class MarkdownEdgeCapsulePreviewViewport : Panel
     public MarkdownEdgeCapsulePreviewViewport()
     {
         ClipToBounds = true;
+        Background = Brushes.Transparent;
         Opacity = 0;
         IsHitTestVisible = false;
         _overflowIndicator = new TextBlock
@@ -178,6 +182,7 @@ internal sealed class MarkdownEdgeCapsulePreviewViewport : Panel
         MarkdownEdgePreviewPreload.Binding? preloadBinding = null,
         (EdgeCapsulePreviewInvalidationSource Source, long Version)? sourceGeneration = null)
     {
+        if (!ReferenceEquals(_content, content)) _offset = 0;
         _content = content;
         _openExternal = openExternal;
         _textZoom = textZoom;
@@ -251,11 +256,21 @@ internal sealed class MarkdownEdgeCapsulePreviewViewport : Panel
         var overflow = _body?.Artifact.Truncated == true || height > finalSize.Height;
         var indicatorHeight = overflow ? Math.Min(finalSize.Height, _overflowIndicator.DesiredSize.Height) : 0;
         var visibleHeight = finalSize.Height - indicatorHeight;
-        _bodyClip.Rect = new Rect(0, 0, finalSize.Width, visibleHeight);
-        _body?.Arrange(new Rect(0, 0, finalSize.Width, height));
-        _overflowIndicator.Opacity = overflow ? 1 : 0;
+        _maximumOffset = Math.Max(0, height - visibleHeight);
+        _offset = Math.Clamp(_offset, 0, _maximumOffset);
+        _bodyClip.Rect = new Rect(0, _offset, finalSize.Width, visibleHeight);
+        _body?.Arrange(new Rect(0, -_offset, finalSize.Width, height));
+        _overflowIndicator.Opacity = (_body?.Artifact.Truncated == true) || _offset < _maximumOffset ? 1 : 0;
         _overflowIndicator.Arrange(new Rect(0, visibleHeight, finalSize.Width, indicatorHeight));
         return finalSize;
+    }
+
+    protected override void OnPreviewMouseWheel(MouseWheelEventArgs e)
+    {
+        base.OnPreviewMouseWheel(e);
+        _offset = EdgePreviewScroll.Offset(_offset, _maximumOffset, ActualHeight, e.Delta);
+        InvalidateArrange();
+        e.Handled = true;
     }
 
     private void Publish(MarkdownPreviewArtifact artifact, Size size)
