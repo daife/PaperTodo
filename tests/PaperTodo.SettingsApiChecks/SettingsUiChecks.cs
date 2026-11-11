@@ -24,100 +24,18 @@ internal static partial class Program
 
     private static void SharedUiSettingBehavior()
     {
-        // Actual UI entry points and API callers share the catalog. Persistence/publication are
-        // substituted here; editor/publication behavior is exercised with a real WPF window below.
+        // Representative entry points cover each value kind plus mutations with side effects.
+        // Ordinary one-line setting aliases do not need a permanent per-setter matrix.
         foreach (var (method, id, hasArgument) in new[]
         {
-            ("SetCapsuleTextSize", "capsule.text_size", true),
-            ("SetColorScheme", "appearance.color_scheme", true),
-            ("SetDeepCapsuleGapSize", "capsule.gap", true),
-            ("SetDeepCapsuleTitleMeasureCharacterLimit", "capsule.title_measure_limit", true),
-            ("SetExperimentalCapsuleMagnetDistance", "window.magnet_distance", true),
-            ("SetExperimentalEdgeCapsuleHoverIntentSensitivity", "edge.hover_sensitivity", true),
-            ("SetExperimentalInactivePaperOpacityLevel", "focus.inactive_opacity", true),
-            ("SetExperimentalRestingCapsuleOpacityLevel", "focus.capsule_opacity", true),
-            ("SetExperimentalShortcutOpacityLevel", "interaction.shortcut_opacity", true),
-            ("SetExperimentalTetherMinimizedBehavior", "window.tether_minimized", true),
-            ("SetExperimentalTodoReminderQuickMinutes", "todo.reminder_quick_minutes", true),
-            ("SetExperimentalTodoReminderSound", "todo.reminder_sound", true),
-            ("SetExperimentalWindowTetherGap", "window.tether_gap", true),
-            ("SetExperimentalWindowTetherPreferredEdge", "window.tether_edge", true),
-            ("SetExternalMarkdownExtension", "note.external_extension", true),
-            ("SetFullscreenTopmostMode", "window.fullscreen_mode", true),
-            ("SetImageReferenceTextMode", "note.image_reference_text", true),
-            ("SetMarkdownRenderMode", "note.markdown_mode", true),
-            ("SetMaxTitleLength", "title.max_length", true),
-            ("SetNoteTextSize", "note.text_size", true),
-            ("SetOverallFontScale", "appearance.font_scale", true),
-            ("SetResizeGripMode", "window.resize_grip", true),
-            ("SetTextRenderingProfile", "appearance.text_rendering", true),
-            ("SetTheme", "appearance.theme", true),
-            ("SetTitleTextSize", "title.text_size", true),
-            ("SetTodoVisualSize", "todo.visual_size", true),
-            ("SetUiFontPreset", "appearance.font_preset", true),
-            ("SetUiLanguage", "general.language", true),
-            ("ToggleAdvancedSettingsMode", "general.advanced_settings", false),
             ("ToggleAnimations", "appearance.animations", false),
-            ("ToggleFastAnimations", "appearance.fast_animations", false),
-            ("ToggleAnonymousUsageStatistics", "privacy.anonymous_usage", false),
-            ("ToggleAutoClearCompletedTodos", "todo.auto_clear_completed", false),
-            ("ToggleAutoCompressLargeImages", "note.compress_large_images", false),
+            ("SetTheme", "appearance.theme", true),
+            ("SetOverallFontScale", "appearance.font_scale", true),
+            ("SetExternalMarkdownExtension", "note.external_extension", true),
+            ("SetMaxTitleLength", "title.max_length", true),
             ("ToggleAutoMoveCompletedTodosToBottom", "todo.move_completed_to_bottom", false),
-            ("ToggleTodoBottomBar", "todo.bottom_bar", false),
-            ("ToggleCapsuleCollapseAll", "capsule.master_enabled", false),
-            ("ToggleCompactMasterCapsule", "capsule.master_compact", false),
-            ("ToggleCapsuleMode", "capsule.enabled", false),
-            ("ToggleCapsuleTextBold", "capsule.text_bold", false),
-            ("ToggleCollapseExpandedDeepCapsuleOnClick", "capsule.click_to_collapse", false),
-            ("ToggleCustomFontEnhancedBold", "appearance.enhanced_bold", false),
-            ("ToggleDeepCapsuleExpandedSlot", "capsule.show_while_expanded", false),
-            ("ToggleDeepCapsuleMode", "capsule.edge_enabled", false),
-            ("ToggleEdgeCapsulePreviewPreferDownward", "edge.preview_prefer_downward", false),
-            ("ToggleExperimentalAllowLockIconUnlock", "interaction.allow_icon_unlock", false),
-            ("ToggleExperimentalCapsuleMagnetScreenEdges", "window.magnet_screen_edges", false),
-            ("ToggleExperimentalCapsuleMagnetWindowEdges", "window.magnet_window_edges", false),
-            ("ToggleExperimentalCapsuleMagnetism", "window.magnet_enabled", false),
-            ("ToggleExperimentalCollapsePaperOnDeactivate", "focus.collapse_on_deactivate", false),
-            ("ToggleExperimentalDockedCapsulesNonTopmost", "edge.non_topmost", false),
-            ("ToggleExperimentalEdgeCapsuleHoverIntent", "edge.hover_intent", false),
-            ("ToggleExperimentalEdgeCapsuleHoverPreview", "edge.preview_enabled", false),
-            ("ToggleExperimentalHideInactiveTitleBar", "focus.hide_inactive_titlebar", false),
-            ("ToggleExperimentalHideInactiveTopBarButtons", "focus.hide_inactive_buttons", false),
-            ("ToggleExperimentalInactivePaperOpacity", "focus.inactive_opacity_enabled", false),
-            ("ToggleExperimentalRestingCapsuleOpacity", "focus.capsule_opacity_enabled", false),
-            ("ToggleExperimentalRestingCapsuleOpacityAlways", "focus.capsule_opacity_always", false),
-            ("ToggleExperimentalRestingCapsuleOpacityIncludesMaster", "focus.opacity_include_master", false),
-            ("ToggleExperimentalTetherVisibilityLink", "window.tether_visibility_link", false),
-            ("ToggleExperimentalTodoReminderShowButton", "todo.reminder_button", false),
-            ("ToggleExperimentalTodoReminderSoundEnabled", "todo.reminder_sound_enabled", false),
-            ("ToggleExperimentalTodoReminders", "todo.reminders", false),
-            ("ToggleExperimentalWindowTethering", "window.tether_enabled", false),
-            ("ToggleHideEdgeCapsuleCloseButtonOnHover", "capsule.hide_close_button", false),
-            ("ToggleHideLinkedPapersFromCapsules", "todo.hide_linked_paper_capsules", false),
             ("ToggleHidePapersFromWindowSwitcher", "window.hide_from_switcher", false),
-            ("ToggleHideScriptRunWindow", "scripts.hide_run_window", false),
-            ("ToggleLinkedPaperNameDisplay", "todo.show_linked_paper_name", false),
-            ("ToggleLinkedPathExtensionOnly", "todo.linked_path_extension_only", false),
-            ("ToggleLongLinkedPaperTitles", "todo.allow_long_linked_titles", false),
-            ("ToggleMarkdownEditAnimation", "note.edit_animations", false),
-            ("ToggleMcpBlankWrites", "mcp.additive_writes", false),
-            ("ToggleMcpDeletes", "mcp.deletes", false),
-            ("ToggleMcpEnabled", "mcp.enabled", false),
-            ("ToggleMcpFullWrites", "mcp.full_writes", false),
-            ("ToggleNoteTextBold", "note.text_bold", false),
-            ("ToggleOpenEdgeCapsuleShortcutAtCursor", "shortcuts.open_edge_at_cursor", false),
-            ("TogglePersistentPowerShellProcess", "scripts.persistent_process", false),
-            ("TogglePreferPowerShell7", "scripts.prefer_powershell7", false),
-            ("TogglePreserveLinkedPaperHiddenStateInVisibilityShortcuts", "shortcuts.preserve_linked_hidden", false),
-            ("ToggleRememberDeepCapsuleExpandedPosition", "capsule.remember_expanded_position", false),
-            ("ToggleRunLinkedScriptCapsulesOnClick", "scripts.run_linked_on_click", false),
-            ("ToggleTitleTextBold", "title.text_bold", false),
-            ("ToggleTodoPaperLinks", "todo.paper_links", false),
-            ("ToggleTodoTextBold", "todo.text_bold", false),
-            ("ToggleToolTips", "general.tooltips", false),
-            ("ToggleTopBarExternalOpenButton", "topbar.external_open", false),
-            ("ToggleTopBarNewNoteButton", "topbar.new_note", false),
-            ("ToggleTopBarNewTodoButton", "topbar.new_todo", false)
+            ("ToggleCapsuleCollapseAll", "capsule.master_enabled", false)
         })
         {
             var ui = Controller();
@@ -160,7 +78,8 @@ internal static partial class Program
         title.State.Papers.Add(new PaperData { Title = "abcdef" });
         SettingsFor(title, () => true, _ => { });
         Invoke(title, "SetMaxTitleLength", 2);
-        Check(title.State.MaxTitleLength == 2 && title.State.Papers[0].Title == "ab", "UI title changes reuse catalog clamping.");
+        Check(title.State.MaxTitleLength == 2 && title.State.Papers[0].Title == "abcdef" &&
+              title.PaperDisplayTitle(title.State.Papers[0]) == "abcd", "UI title limits only change displayed text.");
         var failed = Controller();
         SettingsFor(failed, () => false, _ => throw new Exception("Failed writes must not publish."));
         Invoke(failed, "ToggleTodoPaperLinks");
@@ -188,8 +107,8 @@ internal static partial class Program
             field.SetValue(c, Activator.CreateInstance(field.FieldType));
         }
         var page = typeof(AppController).GetNestedType("SettingsPage", BindingFlags.NonPublic)!;
-        Field(c, "_settingsPage", Enum.Parse(page, "Note"));
-        var root = (UIElement)Invoke(c, "BuildSettingsSidebarNotePage")!;
+        Field(c, "_settingsPage", Enum.Parse(page, "NotesAndTodos"));
+        var root = (UIElement)Invoke(c, "BuildSettingsSidebarNotesAndTodosPage")!;
         var editor = ReadField<TextBox>(c, "_settingsExternalMarkdownTextBox");
         var window = new Window { Content = root, Width = 900, Height = 640 };
         Field(c, "_settingsWindow", window);
@@ -216,6 +135,19 @@ internal static partial class Program
                 "External write updates live editor without writing its old value back.");
             Check(editor.IsKeyboardFocusWithin, "External extension update preserves keyboard focus.");
             editor.Text = ".draft";
+            c.State.ShowLinkedPaperName = true;
+            c.State.EnableTodoPaperLinks = false;
+            Invoke(c, "RefreshSettingsForChange", "todo.paper_links");
+            DrainSettingsUi();
+            Check(c.State.ShowLinkedPaperName && !SettingsControls<CheckBox>(window).Any(box =>
+                    Equals(box.Content, Strings.Get("SettingsShowLinkedPaperName"))),
+                "disabling links hides dependent controls without resetting their saved values");
+            c.State.EnableTodoPaperLinks = true;
+            Invoke(c, "RefreshSettingsForChange", "todo.paper_links");
+            DrainSettingsUi();
+            Check(SettingsControls<CheckBox>(window).Any(box => box.IsVisible && box.IsChecked == true &&
+                    Equals(box.Content, Strings.Get("SettingsShowLinkedPaperName"))),
+                "reenabling links restores the saved child choice immediately");
             service.Set("todo.auto_clear_completed", Json(!c.State.AutoClearCompletedTodos));
             service.Set("note.edit_animations", Json(!c.State.MarkdownEditAnimationEnabled));
             DrainSettingsUi();
@@ -249,6 +181,147 @@ internal static partial class Program
                     { RoutedEvent = Keyboard.LostKeyboardFocusEvent });
                 Check(c.State.ExternalMarkdownExtension == ".rst" && replacement.Text == ".rst", "Late focus event from a detached editor is ignored.");
             }
+        }
+        finally
+        {
+            Field(c, "_settingsWindow", null!);
+            window.Close();
+            DrainSettingsUi();
+        }
+    }
+
+    private static IEnumerable<T> SettingsControls<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is T match) yield return match;
+            foreach (var nested in SettingsControls<T>(child)) yield return nested;
+        }
+    }
+
+    private static void WorkspaceDataSettingsBehavior()
+    {
+        var c = Controller();
+        Field(c, "_settingsRegionRefreshers", new Dictionary<string, Action>());
+        var catalog = (WorkspaceCatalog)System.Runtime.CompilerServices.RuntimeHelpers
+            .GetUninitializedObject(typeof(WorkspaceCatalog));
+        var options = new WorkspaceConfiguration { Enabled = false, Slots = [1, 2] };
+        Field(catalog, "<Options>k__BackingField", options);
+        Field(c, "_workspaceCatalog", catalog);
+        c.State.McpEnabled = true;
+        c.State.McpAllowFullWrites = true;
+        var saves = 0;
+        SettingsFor(c, () => { saves++; return true; }, _ => { });
+        var session = ReadField<WorkspaceSession>(c, "_workspace");
+        var window = new Window { Width = 820, Height = 820 };
+        Field(c, "_settingsWindow", window);
+        void Render()
+        {
+            window.Content = Invoke(c, "BuildWorkspaceSettingsPage");
+            window.UpdateLayout();
+            DrainSettingsUi();
+        }
+        CheckBox Toggle(string key) => SettingsControls<CheckBox>(window)
+            .Single(box => Equals(box.Content, Strings.Get(key)));
+        try
+        {
+            Render();
+            window.Show();
+            window.UpdateLayout();
+            Check(window.Content is Grid { ColumnDefinitions.Count: 3 },
+                "workspaces and data share a two-column layout");
+            Check(Toggle("LabsMcpEnable").IsEnabled &&
+                  SettingsControls<ComboBox>(window).Single().IsEnabled,
+                "disabling workspaces does not disable data handling or MCP");
+            Grid HintRow(string key) => SettingsControls<Grid>(window).Single(row =>
+                row.Children.OfType<CheckBox>().Any(box => Equals(box.Content, Strings.Get(key))));
+            Check(HintRow("LabsMcpEnable").ToolTip == null,
+                "enabled setting rows show descriptions only from the info icon");
+            Check(!Toggle("LabsMcpBlankWrites").IsEnabled &&
+                  HintRow("LabsMcpBlankWrites").ToolTip == null,
+                "disabled settings reveal descriptions only from their info icon");
+            options.Enabled = true;
+            Field(c, "_workspace", new WorkspaceSession(
+                new WorkspacePaths(session.Paths.Directory, 2), session.Store, c.State, true, null));
+            Render();
+            Check(Toggle("WorkspaceEnabled").IsEnabled && !Toggle("LabsMcpEnable").IsEnabled &&
+                  !SettingsControls<ComboBox>(window).Single().IsEnabled,
+                "workspace management stays editable while inherited data and MCP settings are read-only");
+            Check(!HintRow("LabsMcpEnable").IsEnabled &&
+                  HintRow("LabsMcpEnable").ToolTip == null,
+                "inherited disabled rows reveal descriptions only from their info icon");
+            var disabledHints = SettingsControls<Border>(window)
+                .Where(border => border.Cursor == Cursors.Help && border.ToolTip is ToolTip)
+                .ToArray();
+            Check(disabledHints.Length >= 2 && disabledHints.All(ToolTipService.GetShowOnDisabled),
+                "disabled settings keep their info icons accessible");
+            Check(SettingsControls<Button>(window).Where(button =>
+                    Equals(button.Content, Strings.Get("LabsMcpCopyJson")) ||
+                    Equals(button.Content, Strings.Get("LabsMcpCopyAiSkill"))).Count(button => button.IsEnabled) == 2,
+                "read-only inherited MCP settings still allow copying connection information");
+            var policy = c.State.DataMergeConflictPolicy;
+            SettingsControls<ComboBox>(window).Single().SelectedIndex = 2;
+            Invoke(c, "ToggleMcpEnabled");
+            DrainSettingsUi();
+            Check(saves == 0 && c.State.McpEnabled && c.State.DataMergeConflictPolicy == policy,
+                "stale control events cannot mutate or save inherited preferences");
+            Field(c, "_workspace", session);
+            c.State.McpEnabled = false;
+            Render();
+            Check(SettingsControls<CheckBox>(window).Any(box =>
+                    Equals(box.Content, Strings.Get("LabsMcpFullWrites")) &&
+                    box.IsVisible && !box.IsEnabled) && c.State.McpAllowFullWrites,
+                "MCP off greys out permissions rather than hiding or resetting them");
+            c.State.UseCapsuleMode = false;
+            c.State.UseDeepCapsuleMode = false;
+            window.Content = Invoke(c, "BuildLabsEdgeCapsuleHoverIntentSettings");
+            window.UpdateLayout();
+            Check(Toggle("LabsEnableEdgeCapsuleHoverPreview").IsVisible &&
+                  !Toggle("LabsEnableEdgeCapsuleHoverPreview").IsEnabled &&
+                  Toggle("LabsEnableEdgeCapsuleHoverIntent").IsVisible,
+                "edge browsing keeps its dependent settings visible but disabled");
+
+            c.State.UseCapsuleMode = true;
+            c.State.UseDeepCapsuleMode = false;
+            c.State.EnableTodoPaperLinks = c.State.HideLinkedPapersFromCapsules = true;
+            window.Content = Invoke(c, "BuildSettingsCapsuleOptions");
+            window.UpdateLayout();
+            Check(Toggle("SettingsCollapseExpandedDeepCapsuleOnClick").IsVisible &&
+                  !SettingsControls<CheckBox>(window).Any(box =>
+                    Equals(box.Content, Strings.Get("SettingsCapsuleCollapseAll"))),
+                "linked-paper second-click behavior remains available without exposing disabled edge options");
+
+            c.State.EnableTodoPaperLinks = false;
+            c.State.ExperimentalWindowTethering = false;
+            window.Content = Invoke(c, "BuildTopBarShortcutSettings");
+            window.UpdateLayout();
+            var inactiveAssociation = SettingsControls<TextBlock>(window).Single(label =>
+                Equals(label.Text, Strings.Get("TopBarAssociation")));
+            Check(((FrameworkElement)System.Windows.Media.VisualTreeHelper.GetParent(inactiveAssociation)).Opacity == 0.5,
+                "the association shortcut is dimmed when neither linking nor window binding is available");
+            c.State.ExperimentalWindowTethering = true;
+            window.Content = Invoke(c, "BuildTopBarShortcutSettings");
+            window.UpdateLayout();
+            var activeAssociation = SettingsControls<TextBlock>(window).Single(label =>
+                Equals(label.Text, Strings.Get("TopBarAssociation")));
+            Check(((FrameworkElement)System.Windows.Media.VisualTreeHelper.GetParent(activeAssociation)).Opacity == 1,
+                "the association shortcut becomes active with window binding alone");
+            Grid ActionFrame(string key)
+            {
+                var label = SettingsControls<TextBlock>(window).Single(text =>
+                    Equals(text.Text, Strings.Get(key)));
+                DependencyObject? current = label;
+                while (current != null)
+                {
+                    if (current is Grid { AllowDrop: true } frame) return frame;
+                    current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+                }
+                throw new InvalidOperationException("Action frame was not found: " + key);
+            }
+            Check(Math.Abs(ActionFrame("TopBarRunScript").ActualHeight -
+                           ActionFrame("ShortcutNewTodo").ActualHeight) < 1.0,
+                "the compact script Edit button must not increase the shortcut row height");
         }
         finally
         {

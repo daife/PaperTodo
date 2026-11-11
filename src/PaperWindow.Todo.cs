@@ -715,12 +715,10 @@ public sealed partial class PaperWindow
         check.Checked += (_, _) =>
         {
             PushUndoSnapshot();
-            item.Done = true;
+            var clearedReminder = TodoRules.SetDone(item, true);
             InvalidateEdgeCapsulePreviewContent();
-            if (item.ReminderAt.HasValue || item.ReminderTriggered)
+            if (clearedReminder)
             {
-                item.ReminderAt = null;
-                item.ReminderTriggered = false;
                 _controller.NotifyTodoReminderChanged(saveImmediately: false);
             }
             if (reminderButton != null)
@@ -758,7 +756,7 @@ public sealed partial class PaperWindow
         check.Unchecked += (_, _) =>
         {
             PushUndoSnapshot();
-            item.Done = false;
+            TodoRules.SetDone(item, false);
             InvalidateEdgeCapsulePreviewContent();
             if (reminderButton != null)
             {
@@ -843,7 +841,6 @@ public sealed partial class PaperWindow
                 itemMenu.Items.Add(MenuSeparator());
             }
             itemMenu.Items.Add(MenuItem(Strings.Get("MenuDeleteItem"), (_, _) => RemoveItem(item)));
-            itemMenu.Items.Add(MenuItem(Strings.Get("MenuClearDone"), (_, _) => ClearDoneItems()));
 
             return reminderMenu;
         }
@@ -1441,21 +1438,13 @@ public sealed partial class PaperWindow
             var next = NextItem(item);
             var focusTarget = previous?.Id ?? next?.Id;
             _suppressTodoBackspaceUntilKeyUp = true;
-            var previousItems = CloneItems(_paper.Items);
+            var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
 
             // 退格删除不播放动画，直接删除
             PushUndoSnapshot();
-            _paper.Items.RemoveAll(i => i.Id == item.Id);
-
-            if (_paper.Items.Count == 0)
-            {
-                var replacement = new PaperItem();
-                _paper.Items.Add(replacement);
-                focusTarget = replacement.Id;
-            }
+            focusTarget = TodoRules.RemoveItems(_paper.Items, i => i.Id == item.Id)?.Id ?? focusTarget;
 
             NormalizeTodoItems();
-            NormalizeOrders();
             _controller.MarkDirty();
             _controller.NotifyTodoReminderCollectionChanged();
 
@@ -1463,7 +1452,7 @@ public sealed partial class PaperWindow
             ReconcileTodoRows(
                 focusItemId: focusTarget,
                 focusPlacement: focusPlacement);
-            RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
+            RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
             e.Handled = true;
         }
     }
@@ -1663,9 +1652,7 @@ public sealed partial class PaperWindow
         if (!_controller.State.EnableTodoPaperLinks &&
             !_controller.State.ExperimentalWindowTethering)
         {
-            EndTopBarDragGesture(
-                commit: false,
-                TopBarDragKind.WindowBinding);
+            EndTopBarDragGesture(commit: false);
         }
 
         RefreshTodoRowsForExternalChange();
@@ -1710,72 +1697,46 @@ public sealed partial class PaperWindow
             .Where(i => i.Id == itemId)
             .SelectMany(i => i.LinkedPaperIds)
             .ToList();
+        var row = _controller.State.EnableAnimations
+            ? _todoRows.FirstOrDefault(r => (string)r.Tag == itemId)
+            : null;
 
-        // 删除动画
-        if (_controller.State.EnableAnimations)
-        {
-            var row = _todoRows.FirstOrDefault(r => (string)r.Tag == itemId);
-            if (row != null)
-            {
-                _paper.Items.RemoveAll(i => i.Id == itemId);
-
-                if (_paper.Items.Count == 0)
-                {
-                    var replacement = new PaperItem();
-                    _paper.Items.Add(replacement);
-                    fallbackFocus = replacement.Id;
-                }
-
-                NormalizeTodoItems();
-                NormalizeOrders();
-                _controller.MarkDirty();
-                _controller.NotifyTodoReminderCollectionChanged();
-                RefreshCapsuleEligibilityForLinkedPapers(removedLinkedPaperIds);
-
-                var animationGeneration = _todoRowsGeneration;
-                row.IsHitTestVisible = false;
-                AnimationHelper.EnsureTransform(row);
-                var fadeOut = new System.Windows.Media.Animation.DoubleAnimation(
-                    1,
-                    0,
-                    TimeSpan.FromMilliseconds(AnimationTiming.ScaleMilliseconds(200)));
-                var slideOut = new System.Windows.Media.Animation.DoubleAnimation(
-                    0,
-                    30,
-                    TimeSpan.FromMilliseconds(AnimationTiming.ScaleMilliseconds(200)))
-                {
-                    EasingFunction = AnimationHelper.QuickEase
-                };
-
-                fadeOut.Completed += (s, e) =>
-                {
-                    if (rebuild && animationGeneration == _todoRowsGeneration)
-                    {
-                        ReconcileTodoRows(focusItemId: fallbackFocus);
-                    }
-                };
-
-                row.BeginAnimation(OpacityProperty, fadeOut);
-                AnimationHelper.GetTranslateTransform(row).BeginAnimation(TranslateTransform.XProperty, slideOut);
-                return;
-            }
-        }
-
-        // 无动画或找不到行时直接删除
-        _paper.Items.RemoveAll(i => i.Id == itemId);
-
-        if (_paper.Items.Count == 0)
-        {
-            var replacement = new PaperItem();
-            _paper.Items.Add(replacement);
-            fallbackFocus = replacement.Id;
-        }
-
+        fallbackFocus = TodoRules.RemoveItems(_paper.Items, i => i.Id == itemId)?.Id ?? fallbackFocus;
         NormalizeTodoItems();
-        NormalizeOrders();
         _controller.MarkDirty();
         _controller.NotifyTodoReminderCollectionChanged();
         RefreshCapsuleEligibilityForLinkedPapers(removedLinkedPaperIds);
+
+        // 删除动画
+        if (row != null)
+        {
+            var animationGeneration = _todoRowsGeneration;
+            row.IsHitTestVisible = false;
+            AnimationHelper.EnsureTransform(row);
+            var fadeOut = new System.Windows.Media.Animation.DoubleAnimation(
+                1,
+                0,
+                TimeSpan.FromMilliseconds(AnimationTiming.ScaleMilliseconds(200)));
+            var slideOut = new System.Windows.Media.Animation.DoubleAnimation(
+                0,
+                30,
+                TimeSpan.FromMilliseconds(AnimationTiming.ScaleMilliseconds(200)))
+            {
+                EasingFunction = AnimationHelper.QuickEase
+            };
+
+            fadeOut.Completed += (s, e) =>
+            {
+                if (rebuild && animationGeneration == _todoRowsGeneration)
+                {
+                    ReconcileTodoRows(focusItemId: fallbackFocus);
+                }
+            };
+
+            row.BeginAnimation(OpacityProperty, fadeOut);
+            AnimationHelper.GetTranslateTransform(row).BeginAnimation(TranslateTransform.XProperty, slideOut);
+            return;
+        }
 
         if (rebuild)
         {
@@ -1783,152 +1744,22 @@ public sealed partial class PaperWindow
         }
     }
 
-    private void ClearDoneItems()
-    {
-        if (_paper.Type != PaperTypes.Todo)
-        {
-            return;
-        }
-
-        var focusedId = CurrentFocusedTodoItemId();
-        var completedItems = OrderedItems().Where(i => i.Done).ToList();
-        if (completedItems.Count == 0)
-        {
-            return;
-        }
-
-        var completedItemIds = new HashSet<string>(completedItems.Select(i => i.Id), StringComparer.Ordinal);
-        var removedLinkedPaperIds = completedItems
-            .SelectMany(i => i.LinkedPaperIds)
-            .ToList();
-        var clearDoneGeneration = ++_clearDoneGeneration;
-
-        PushUndoSnapshot();
-        var remainingItems = OrderedItems()
-            .Where(i => !completedItemIds.Contains(i.Id))
-            .ToList();
-
-        if (remainingItems.Count == 0)
-        {
-            remainingItems.Add(new PaperItem());
-        }
-
-        _paper.Items = remainingItems;
-        NormalizeTodoItems();
-        NormalizeOrders();
-
-        var focus = remainingItems.FirstOrDefault(i => i.Id == focusedId)?.Id
-            ?? remainingItems.FirstOrDefault(i => !TodoRules.IsPlaceholder(i))?.Id
-            ?? remainingItems.FirstOrDefault()?.Id;
-
-        _controller.MarkDirty();
-        _controller.NotifyTodoReminderCollectionChanged();
-        RefreshCapsuleEligibilityForLinkedPapers(removedLinkedPaperIds);
-
-        // 批量消失动画
-        if (_controller.State.EnableAnimations && completedItems.Count > 0)
-        {
-            var animatedRows = completedItems
-                .Take(15)
-                .Select(item => _todoRows.FirstOrDefault(r => (string)r.Tag == item.Id))
-                .Where(row => row != null)
-                .Cast<Border>()
-                .ToList();
-
-            if (animatedRows.Count > 0)
-            {
-                var rowGeneration = _todoRowsGeneration;
-                var rowAnimationMilliseconds = AnimationTiming.ScaleMilliseconds(180);
-                var rowStaggerMilliseconds = AnimationTiming.ScaleMilliseconds(30);
-                for (int i = 0; i < animatedRows.Count; i++)
-                {
-                    var row = animatedRows[i];
-                    row.IsHitTestVisible = false;
-                    var delay = i * rowStaggerMilliseconds;
-                    void StartRowAnimation()
-                    {
-                        if (clearDoneGeneration != _clearDoneGeneration ||
-                            rowGeneration != _todoRowsGeneration ||
-                            !_todoRows.Contains(row))
-                        {
-                            return;
-                        }
-
-                        var fadeOut = new System.Windows.Media.Animation.DoubleAnimation(
-                            1,
-                            0,
-                            TimeSpan.FromMilliseconds(rowAnimationMilliseconds));
-                        var slideOut = new System.Windows.Media.Animation.DoubleAnimation(
-                            0,
-                            20,
-                            TimeSpan.FromMilliseconds(rowAnimationMilliseconds))
-                        {
-                            EasingFunction = AnimationHelper.QuickEase
-                        };
-
-                        row.BeginAnimation(OpacityProperty, fadeOut);
-                        AnimationHelper.GetTranslateTransform(row).BeginAnimation(TranslateTransform.XProperty, slideOut);
-                    }
-
-                    if (delay == 0)
-                    {
-                        StartRowAnimation();
-                        continue;
-                    }
-
-                    var timer = new System.Windows.Threading.DispatcherTimer
-                    {
-                        Interval = TimeSpan.FromMilliseconds(delay)
-                    };
-                    timer.Tick += (s, _) =>
-                    {
-                        timer.Stop();
-                        StartRowAnimation();
-                    };
-                    timer.Start();
-                }
-
-                var finalizeTimer = new System.Windows.Threading.DispatcherTimer
-                {
-                    Interval = TimeSpan.FromMilliseconds(
-                        ((animatedRows.Count - 1) * rowStaggerMilliseconds) +
-                        rowAnimationMilliseconds)
-                };
-                finalizeTimer.Tick += (_, _) =>
-                {
-                    finalizeTimer.Stop();
-                    if (clearDoneGeneration == _clearDoneGeneration &&
-                        rowGeneration == _todoRowsGeneration)
-                    {
-                        ReconcileTodoRows(focusItemId: focus);
-                    }
-                };
-                finalizeTimer.Start();
-                return;
-            }
-        }
-
-        ReconcileTodoRows(focusItemId: focus);
-    }
-
     private void RefreshCapsuleEligibilityForLinkedPapers(IEnumerable<string?> paperIds)
     {
         _controller.RefreshCapsuleEligibilityForLinkedPapers(paperIds);
     }
 
-    private void RefreshCapsuleEligibilityForLinkedPaperChanges(IEnumerable<PaperItem> previousItems)
-    {
-        var changedPaperIds = previousItems
+    private static HashSet<string> CaptureLinkedPaperIds(IEnumerable<PaperItem> items) =>
+        items
             .SelectMany(item => item.LinkedPaperIds)
-            .Where(paperId => !string.IsNullOrWhiteSpace(paperId))
-            .Select(paperId => paperId!)
             .ToHashSet(StringComparer.Ordinal);
-        changedPaperIds.SymmetricExceptWith(_paper.Items
-            .SelectMany(item => item.LinkedPaperIds)
-            .Where(paperId => !string.IsNullOrWhiteSpace(paperId))
-            .Select(paperId => paperId!));
 
-        RefreshCapsuleEligibilityForLinkedPapers(changedPaperIds);
+    private void RefreshCapsuleEligibilityForLinkedPaperChanges(HashSet<string> previousLinkedPaperIds)
+    {
+        previousLinkedPaperIds.SymmetricExceptWith(_paper.Items
+            .SelectMany(item => item.LinkedPaperIds));
+
+        RefreshCapsuleEligibilityForLinkedPapers(previousLinkedPaperIds);
     }
 
     public bool TryHitTodoRow(Point screenPoint, out string? itemId)
@@ -2009,12 +1840,12 @@ public sealed partial class PaperWindow
         }
 
         var focusedId = CurrentFocusedTodoItemId();
-        var previousItems = CloneItems(_paper.Items);
+        var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
         PushUndoSnapshot();
         item.AddQuickLaunchLink(new(paperId, null));
         _controller.MarkDirty();
         ReconcileTodoRows([item.Id], focusedId);
-        RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
         return true;
     }
 
@@ -2026,12 +1857,32 @@ public sealed partial class PaperWindow
         }
 
         var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
-        var previousItems = CloneItems(_paper.Items);
+        var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
         PushUndoSnapshot();
         item.RemoveQuickLaunchLink(new(item.LinkedPaperId, null));
         _controller.MarkDirty();
         ReconcileTodoRows([item.Id], focusedId);
-        RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
+    }
+
+    internal void UnlinkPaperFromTodoItems(string linkedPaperId)
+    {
+        var items = _paper.Items.Where(item => item.LinkedPaperIds.Contains(linkedPaperId, StringComparer.Ordinal)).ToArray();
+        if (_paper.Type != PaperTypes.Todo || items.Length == 0)
+        {
+            return;
+        }
+
+        var focusedId = CurrentFocusedTodoItemId();
+        var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
+        PushUndoSnapshot();
+        foreach (var item in items)
+        {
+            item.ClearQuickLaunch();
+        }
+        _controller.MarkDirty();
+        ReconcileTodoRows(items.Select(item => item.Id), focusedId);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
     }
 
     private void ClearPaperLinkDropTargetVisual()
@@ -2672,7 +2523,7 @@ public sealed partial class PaperWindow
         _undoStack.RemoveAt(_undoStack.Count - 1);
 
         RestoreTodoHistorySnapshot(previousItems, focusedId);
-        RefreshCapsuleEligibilityForLinkedPaperChanges(currentItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(CaptureLinkedPaperIds(currentItems));
     }
 
     private void Redo()
@@ -2691,7 +2542,7 @@ public sealed partial class PaperWindow
         _redoStack.RemoveAt(_redoStack.Count - 1);
 
         RestoreTodoHistorySnapshot(nextItems, focusedId);
-        RefreshCapsuleEligibilityForLinkedPaperChanges(currentItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(CaptureLinkedPaperIds(currentItems));
     }
 
     private void RestoreTodoHistorySnapshot(List<PaperItem> snapshot, string? focusedId)
@@ -2757,8 +2608,6 @@ public sealed partial class PaperWindow
     private static bool TodoHistoryRowContentEquals(PaperItem current, PaperItem restored) =>
         current.Text == restored.Text &&
         current.Done == restored.Done &&
-        current.LinkedPaperId == restored.LinkedPaperId &&
-        current.LinkedPath == restored.LinkedPath &&
         current.GetQuickLaunchLinks().SequenceEqual(restored.GetQuickLaunchLinks()) &&
         current.ReminderAt == restored.ReminderAt &&
         current.ReminderAt?.Offset == restored.ReminderAt?.Offset &&

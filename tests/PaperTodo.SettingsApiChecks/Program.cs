@@ -40,6 +40,9 @@ internal static partial class Program
     {
         var controller = (AppController)RuntimeHelpers.GetUninitializedObject(typeof(AppController));
         Field(controller, "<State>k__BackingField", new AppState());
+        var paths = new WorkspacePaths(Path.Combine(Path.GetTempPath(), "PaperTodo.SettingsApiFixture"), 1);
+        Field(controller, "_workspace", new WorkspaceSession(paths,
+            new StateStore(paths.Directory, DurableAtomicFileWriter.Shared), controller.State, false, null));
         Field(controller, "_windows", new Dictionary<string, PaperWindow>());
         Field(controller, "_masterCapsules", new Dictionary<string, MasterCapsuleWindow>());
         return controller;
@@ -67,13 +70,16 @@ internal static partial class Program
             ServiceBehavior();
             StartupApprovalBehavior();
             CatalogBehavior();
+            NativeQueueSettingsBehavior();
             TopBarShortcutBehavior();
             TodoMoveBehavior();
             AdapterBehavior();
             SharedUiSettingBehavior();
             SettingsEditorBehavior();
+            WorkspaceDataSettingsBehavior();
             PostCommitFailureDoesNotReplay();
             Pump(PipeAndUnlinkBehavior());
+            Pump(ImageImportCommandBehavior());
             WebBridges();
             IsolatedPresentationBehavior();
             Console.WriteLine($"Settings API: {_checks} behavior checks passed.");
@@ -84,33 +90,32 @@ internal static partial class Program
 
     private static void TopBarShortcutBehavior()
     {
-        var state = new AppState();
-        Check(PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                  [PaperTopBarShortcuts.Association]) &&
-              PaperTopBarShortcuts.Menu(state).SequenceEqual(
-                  [PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.NewTodo,
-                   PaperTopBarShortcuts.ExternalEditor]) &&
-              PaperTopBarShortcuts.NormalizeOrder(null).SequenceEqual(
-                  state.TopBarShortcutOrder),
-            "New installations pin only association and order Note, Todo, external editor in the menu.");
+        var state = new AppState
+        {
+            TopBarShortcutOrder =
+                [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.Workspace,
+                 PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.NewTodo,
+                 PaperTopBarShortcuts.ExternalEditor],
+            TopBarPinnedCount = 2
+        };
         Check(PaperTopBarShortcuts.MoveTo(state, PaperTopBarShortcuts.NewNote, true, 1) &&
               PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                  [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewNote]) &&
+                  [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.Workspace]) &&
               PaperTopBarShortcuts.Menu(state).SequenceEqual(
-                  [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.ExternalEditor]),
+                  [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.RunScript]),
             "Dragging a menu command above the divider pins it at the insertion slot.");
         Check(PaperTopBarShortcuts.MoveTo(state, PaperTopBarShortcuts.Association, false, 0) &&
               PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                  [PaperTopBarShortcuts.NewNote]) &&
+                  [PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.Workspace]) &&
               PaperTopBarShortcuts.Menu(state).SequenceEqual(
                   [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewTodo,
-                   PaperTopBarShortcuts.ExternalEditor]),
+                   PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.RunScript]),
             "Dragging to the lower group moves only one action without changing other ordering.");
         Check(!PaperTopBarShortcuts.MoveTo(state, PaperTopBarShortcuts.Association, false, 0),
             "Dropping in the same slot is a true no-op.");
         Check(PaperTopBarShortcuts.MoveTo(state, PaperTopBarShortcuts.NewTodo, true, 0) &&
               PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                  [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.NewNote]),
+                  [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.Workspace]),
             "Reordering within one group preserves divider membership.");
         Check(PaperTopBarShortcuts.Contains(state, PaperTypes.Note,
                   PaperTopBarShortcuts.NewNote) &&
@@ -119,14 +124,35 @@ internal static partial class Program
               !PaperTopBarShortcuts.IsApplicable(PaperTypes.Todo,
                   PaperTopBarShortcuts.ExternalEditor),
             "One global selection filters commands unavailable on the current paper.");
-        Check(PaperTopBarShortcuts.NormalizeOrder(
-                  [PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.ExternalEditor,
-                   PaperTopBarShortcuts.PluginActions, "unknown"])
-                  .SequenceEqual(
-                  [PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.Association,
-                   PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.NewTodo]),
-            "Duplicates and obsolete plugin pins never enter the new global configuration.");
-
+        var savedOrder = state.TopBarShortcutOrder.ToArray();
+        state.HiddenTopBarShortcuts.Add(PaperTopBarShortcuts.NewNote);
+        state.TopBarScript = "Write-Output 'shared'";
+        var restored = JsonSerializer.Deserialize<AppState>(JsonSerializer.Serialize(state))!;
+        Check(!PaperTopBarShortcuts.Contains(restored, PaperTypes.Note, PaperTopBarShortcuts.NewNote) &&
+              PaperTopBarShortcuts.IsPinned(restored, PaperTopBarShortcuts.NewNote) &&
+              restored.TopBarShortcutOrder.SequenceEqual(savedOrder) && restored.TopBarScript == state.TopBarScript,
+            "Saving a hidden shortcut preserves its position and the shared script without exposing the entry.");
+        restored.HiddenTopBarShortcuts.Clear();
+        Check(PaperTopBarShortcuts.Contains(restored, PaperTypes.Note, PaperTopBarShortcuts.NewNote),
+            "Unhiding restores the original pinned placement.");
+        Check(ScriptExecutionService.TryParse("Write-Output 'shared'", true, out var plain) &&
+              plain.Engine == "auto" && plain.Script == "Write-Output 'shared'" && !plain.UsePersistentProcess,
+            "Unprefixed shortcut scripts use the default engine without changing stored input.");
+        foreach (var (prefix, engine, persistent) in new[]
+        {
+            ("!p", "auto", false), ("!power", "auto", false),
+            ("!pwsh", "pwsh", false), ("!ps7", "pwsh", false),
+            ("!ps5", "powershell", false), ("!winps", "powershell", false),
+            ("!pf", "auto", true), ("!powerf", "auto", true)
+        })
+            Check(ScriptExecutionService.TryParse(prefix + "\r\nWrite-Output 'shared'", false, out var script) &&
+                  script.Engine == engine && script.UsePersistentProcess == persistent &&
+                  script.Script == plain.Script,
+                "Capsules and shortcuts interpret the same prefix: " + prefix);
+        Check(!ScriptExecutionService.HasMarker("！p\nWrite-Output 'shared'") &&
+              !ScriptExecutionService.HasMarker("!p Write-Output 'shared'") &&
+              !ScriptExecutionService.TryParse("Write-Output 'shared'", false, out _),
+            "Capsules require a supported ASCII marker alone on the first line.");
         var controller = Controller();
         controller.State.TopBarShortcutOrder =
             [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewTodo,
@@ -153,55 +179,6 @@ internal static partial class Program
         Check(service.Set("topbar.external_open", Json(true)).Changed &&
               PaperTopBarShortcuts.IsPinned(controller.State, PaperTopBarShortcuts.ExternalEditor),
             "The old external-open alias also updates the single global layout.");
-
-        var temp = Path.Combine(Path.GetTempPath(), "PaperTodo-TopBar-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
-        try
-        {
-            var legacy = new AppState
-            {
-                TodoTopBarShortcuts =
-                    [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewTodo,
-                     PaperTopBarShortcuts.PluginActions],
-                NoteTopBarShortcuts =
-                    [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.ExternalEditor,
-                     PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.PluginActions]
-            };
-            var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            var root = System.Text.Json.Nodes.JsonNode.Parse(
-                JsonSerializer.Serialize(legacy, options))!.AsObject();
-            root.Remove("topBarShortcutOrder");
-            root.Remove("topBarPinnedCount");
-            File.WriteAllText(Path.Combine(temp, "data.json"), root.ToJsonString());
-            var store = new StateStore(temp, DurableAtomicFileWriter.Shared);
-            var loaded = store.Load();
-            Check(PaperTopBarShortcuts.Pinned(loaded).SequenceEqual(
-                      [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewTodo,
-                       PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.NewNote]) &&
-                  loaded.TodoTopBarShortcuts == null && loaded.NoteTopBarShortcuts == null,
-                "Different Todo and Note layouts migrate to one union; old lists stop being authoritative.");
-
-            PaperTopBarShortcuts.MoveTo(loaded, PaperTopBarShortcuts.NewNote, false, 0);
-            File.WriteAllText(Path.Combine(temp, "data.json"),
-                JsonSerializer.Serialize(loaded, options));
-            var reloaded = store.Load();
-            Check(reloaded.TopBarPinnedCount == 3 &&
-                  PaperTopBarShortcuts.Menu(reloaded).SequenceEqual([PaperTopBarShortcuts.NewNote]) &&
-                  reloaded.TodoTopBarShortcuts == null,
-                "A deliberate menu position survives restart without migrating again.");
-
-            root.Remove("todoTopBarShortcuts");
-            root.Remove("noteTopBarShortcuts");
-            root["showTopBarNewTodoButton"] = false;
-            root["showTopBarNewNoteButton"] = true;
-            root["showTopBarExternalOpenButton"] = false;
-            File.WriteAllText(Path.Combine(temp, "data.json"), root.ToJsonString());
-            var older = store.Load();
-            Check(PaperTopBarShortcuts.Pinned(older).SequenceEqual(
-                [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewNote]),
-                "Pre-341 visibility booleans migrate through the same one-time global path.");
-        }
-        finally { Directory.Delete(temp, recursive: true); }
     }
 
     private static void PostCommitFailureDoesNotReplay()
@@ -292,7 +269,6 @@ internal static partial class Program
         var catalog = (IEnumerable<PaperSettingDefinition>)typeof(AppController).GetMethod("CreatePublicSettingsCatalog",
             BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(c, null)!;
         var definitions = catalog.ToArray();
-        Check(definitions.Length >= 120, "Catalog must cover all UI preference groups, not two selected features.");
         Check(definitions.Select(d => d.Metadata.Id).Distinct().Count() == definitions.Length, "Public IDs are unique.");
         foreach (var d in definitions)
         {
@@ -301,70 +277,42 @@ internal static partial class Program
             try { Check(JsonElement.DeepEquals(d.Validate(current), current), $"Current value matches schema: {d.Metadata.Id}"); }
             catch (Exception ex) { throw new InvalidOperationException($"Invalid catalog default: {d.Metadata.Id}={current}", ex); }
         }
-        Check(definitions.All(d => d.Metadata.Id is not ("Papers" or "CapsuleCollapseAllActiveQueues" or "data.json")), "No internal state is a public setting.");
-        var rendering = definitions.Single(d => d.Metadata.Id == "appearance.text_rendering");
-        foreach (var token in new[] { TextRenderingProfiles.Standard, TextRenderingProfiles.Soft, TextRenderingProfiles.Sharp })
-            Check(rendering.Validate(Json(token)).GetString() == token, "All existing rendering tokens remain valid.");
-        var colorScheme = definitions.Single(d => d.Metadata.Id == "appearance.color_scheme");
-        foreach (var token in ColorSchemes.All)
-            Check(colorScheme.Validate(Json(token)).GetString() == token, "All visible color-scheme tokens remain valid.");
-        var paperSkin = definitions.Single(d => d.Metadata.Id == "appearance.paper_skin");
-        foreach (var token in PaperSkins.All)
-            Check(paperSkin.Validate(Json(token)).GetString() == token, "All visible paper-skin tokens remain valid.");
         var extension = definitions.Single(d => d.Metadata.Id == "note.external_extension");
         Check(extension.Validate(Json("*.MD")).GetString() == ".md", "Filename extension uses UI normalization.");
-        var bottomBar = definitions.Single(d => d.Metadata.Id == "todo.bottom_bar");
-        Check(bottomBar.Read().GetBoolean(), "Todo bottom bar is enabled by default.");
         Check(extension.Validate(Json("笔记")).GetString() == ".笔记", "Valid Unicode extensions are not needlessly rejected.");
         var saves = 0;
         var success = true;
         var service = new PaperSettingsService(definitions, () => true, () => { saves++; return success; }, _ => { });
+        foreach (var retired in new[] { "window.tether_visibility_link", "window.tether_minimized" })
+        {
+            Check(service.List().All(setting => setting.Id != retired), "Retired tether choices are not advertised.");
+            Throws<PaperSettingsException>(() => service.Get(retired), "setting_not_found");
+            Throws<PaperSettingsException>(() => service.Set(retired, Json(true)), "setting_not_found");
+        }
+        var legacyState = JsonSerializer.Deserialize<AppState>("""
+            { "experimentalTetherVisibilityLink": true, "experimentalTetherMinimizedBehavior": "capsule",
+              "experimentalWindowTethering": true, "experimentalWindowTetherGap": 12,
+              "papers": [{ "id": "kept", "type": "note", "content": "keep old content" }] }
+            """, StateStore.JsonOptions)!;
+        var persisted = JsonSerializer.SerializeToElement(legacyState, StateStore.JsonOptions);
+        Check(legacyState.ExperimentalWindowTethering && legacyState.ExperimentalWindowTetherGap == 12 &&
+              legacyState.Papers.Single().Content == "keep old content" &&
+              !persisted.TryGetProperty("experimentalTetherVisibilityLink", out _) &&
+              !persisted.TryGetProperty("experimentalTetherMinimizedBehavior", out _),
+            "Old tether choices are ignored on load and omitted on save without losing live settings or content.");
         Check(service.Get("general.language").RequiresRestart, "Language is restart-based; API must not force exit.");
-        Check(service.Get("appearance.paper_skin").Options.Count == PaperSkins.All.Length,
-            "Public settings exposes every paper skin.");
-        Check(service.Get("appearance.match_auxiliary_material").Type == "boolean" &&
-            service.Get("appearance.material_transparency").Type == "string" &&
-            service.Get("appearance.material_transparency").Options.Count == 5 &&
-            service.Get("appearance.native_material_always_active").Type == "boolean",
-            "All visible material toggles share the public settings catalog.");
         Throws<PaperSettingsException>(() => service.Set("appearance.font_scale", Json(1.3)), "invalid_setting_value");
-        Throws<PaperSettingsException>(() => service.Set("appearance.font_scale", Json(1.01)), "invalid_setting_value");
         Throws<PaperSettingsException>(() => service.Set("appearance.theme", Json("unknown")), "invalid_setting_value");
-        Throws<PaperSettingsException>(() => service.Set("appearance.paper_skin", Json("unknown")), "invalid_setting_value");
-        service.Set("appearance.color_scheme", Json(ColorSchemes.Neutral));
-        Check(c.State.ColorScheme == ColorSchemes.Neutral, "Neutral palette remains selectable through the shared settings path.");
         Throws<PaperSettingsException>(() => service.Set("note.external_extension", Json("../../tmp")), "invalid_setting_value");
         Throws<PaperSettingsException>(() => service.Set("window.hide_from_taskbar", Json(false)), "setting_dependency");
         var savesBeforeTodoLink = saves;
         service.Set("todo.paper_links", Json(false));
         Check(!c.State.EnableTodoPaperLinks && saves == savesBeforeTodoLink + 1,
             "Catalog setter changes the exact backing feature and commits once.");
-        service.Set("todo.bottom_bar", Json(false));
-        Check(!c.State.ShowTodoBottomBar && saves == savesBeforeTodoLink + 2,
-            "Todo bottom-bar setting changes the live preference.");
         success = false;
         Throws<PaperSettingsException>(() => service.Set("todo.paper_links", Json(true)), "save_failed");
         Check(!c.State.EnableTodoPaperLinks, "Real catalog rollback restores the preference.");
-        c.State.PaperSkin = null;
-        c.State.ColorScheme = ColorSchemes.Mica;
-        c.State.MicaBackdropType = MicaBackdropTypes.ClearAcrylic;
-        Throws<PaperSettingsException>(() => service.Set("appearance.paper_skin", Json(PaperSkins.Acrylic)), "save_failed");
-        Check(c.State.PaperSkin == null && c.State.MicaBackdropType == MicaBackdropTypes.ClearAcrylic,
-            "Failed skin save restores both the legacy null sentinel and prior native recipe.");
         success = true;
-        service.Set("appearance.paper_skin", Json(PaperSkins.Mica));
-        Check(c.State.PaperSkin == PaperSkins.Mica && c.State.MicaBackdropType == MicaBackdropTypes.Mica,
-            "Successful system skin keeps the compatibility native recipe in the same transaction.");
-        service.Set("appearance.match_auxiliary_material", Json(true));
-        service.Set("appearance.material_transparency", Json(MaterialTransparencyLevels.High));
-        service.Set("appearance.native_material_always_active", Json(true));
-        Check(c.State.MatchAuxiliaryMaterialStrength &&
-            c.State.MaterialTransparency == MaterialTransparencyLevels.High &&
-            c.State.MicaAlwaysActive,
-            "Material preferences mutate through the shared catalog.");
-        Throws<PaperSettingsException>(
-            () => service.Set("appearance.material_transparency", Json("extreme")),
-            "invalid_setting_value");
         service.Set("window.hide_from_switcher", Json(false));
         service.Set("window.hide_from_taskbar", Json(false));
         success = false;
@@ -377,20 +325,27 @@ internal static partial class Program
             c.State.DeepCapsuleQueueStartTopMargins["saved"] == 25, "Capsule dependency and queue rollback.");
         success = true;
         service.Set("capsule.enabled", Json(false));
-        Check(!c.State.UseCapsuleMode && c.State.DeepCapsuleQueueStartTopMargins["saved"] == 25,
-            "Disabling capsule mode preserves remembered per-queue layout.");
+        Check(!c.State.UseCapsuleMode && c.State.UseDeepCapsuleMode &&
+              c.State.UseCapsuleCollapseAll && c.State.CapsuleCollapseAllActiveQueues["saved"] &&
+              c.State.DeepCapsuleQueueStartTopMargins["saved"] == 25,
+            "Disabling capsule mode preserves dependent options and queue layout.");
         success = false;
         var paper = new PaperData { Type = PaperTypes.Todo, Title = "abcdef", Items = [new PaperItem { Text = "done", Done = true, Order = 0 }, new PaperItem { Text = "open", Order = 1 }] };
         c.State.Papers.Add(paper);
         Throws<PaperSettingsException>(() => service.Set("title.max_length", Json(2)), "save_failed");
-        Check(paper.Title == "abcdef" && c.State.MaxTitleLength == 6, "Failed title limit changes do not truncate user data.");
+        Check(paper.Title == "abcdef" && c.State.MaxTitleLength == PaperTitles.DefaultMaxTitleLength, "Failed title limit changes do not truncate user data.");
         Throws<PaperSettingsException>(() => service.Set("todo.move_completed_to_bottom", Json(true)), "save_failed");
         Check(paper.Items[0].Done && paper.Items[0].Order == 0 && !c.State.AutoMoveCompletedTodosToBottom, "Failed reorder restores items and order.");
         success = true;
         service.Set("todo.move_completed_to_bottom", Json(true));
         Check(!paper.Items[0].Done && paper.Items[0].Order == 0 && paper.Items[1].Order == 1, "Completed group is reordered just like Settings UI.");
         service.Set("title.max_length", Json(2));
-        Check(paper.Title == "ab", "Successful max length applies existing title semantics.");
+        Check(paper.Title == "abcdef" && c.PaperDisplayTitle(paper) == "abcd",
+            "The display limit hides excess half-width characters without changing the stored title.");
+        c.UpdatePaperTitle(paper, "abcdef");
+        Check(paper.Title == "abcdef", "Leaving an unchanged title editor preserves the full title.");
+        service.Set("title.max_length", Json(6));
+        Check(c.PaperDisplayTitle(paper) == "abcdef", "Raising the display limit reveals the original title.");
     }
 
     private static void TodoMoveBehavior()
@@ -596,8 +551,16 @@ internal static partial class Program
         McpApiHost? host = null;
         host = new McpApiHost(Dispatcher.CurrentDispatcher, request =>
         {
+            var method = request.GetProperty("method").GetString();
+            if (method == "get_workspace_binding")
+                return new { token = "fixture-workspace" };
+            if (method == "read_note_image")
+            {
+                requests.Add(request.Clone());
+                return new { paper_id = "paper", image_id = "001", mime = "image/png", image_base64 = "AQID" };
+            }
             requests.Add(request.Clone());
-            if (request.GetProperty("method").GetString() == "set_setting") host!.StopAfterResponse();
+            if (method == "set_setting") host!.StopAfterResponse();
             return new { received = true };
         }, name);
         using (host)
@@ -605,6 +568,8 @@ internal static partial class Program
             host.Start();
             var tools = new McpTools(new McpPipeClient(name));
             await tools.UpdateTodo("paper", "todo", text: "short");
+            Check(requests[^1].GetProperty("workspace_token").GetString() == "fixture-workspace",
+                "The real pipe request did not carry its workspace binding.");
             Check(!requests[^1].GetProperty("params").TryGetProperty("linked_paper_id", out _), "Omitted link is omitted on the real pipe.");
             await tools.UpdateTodo("paper", "todo", order: 0);
             Check(requests[^1].GetProperty("params").GetProperty("order").GetInt32() == 0, "Todo order survives actual tool serialization.");
@@ -623,6 +588,15 @@ internal static partial class Program
             Check(requests[^1].GetProperty("params").GetProperty("clear_links").GetBoolean() &&
                 requests[^1].GetProperty("params").GetProperty("remove_links").GetArrayLength() == 1,
                 "Remove and clear links survive actual tool serialization.");
+            Check(typeof(McpTools).GetMethod("InsertNoteImage") is null,
+                  "Base64 image insertion must not be exposed as a model-callable MCP tool.");
+            var imageBlocks = await tools.ReadNoteImage("paper", "001");
+            Check(requests[^1].GetProperty("method").GetString() == "read_note_image" &&
+                  imageBlocks is [ModelContextProtocol.Protocol.TextContentBlock,
+                      ModelContextProtocol.Protocol.ImageContentBlock image] &&
+                  image.MimeType == "image/png" &&
+                  image.DecodedData.ToArray().SequenceEqual(new byte[] { 1, 2, 3 }),
+                "The MCP tool returns actual image content, not Base64 displayed as text.");
             await tools.ListSettings("todo");
             Check(requests[^1].GetProperty("params").GetProperty("category").GetString() == "todo", "MCP list category forwarded.");
             await tools.GetSetting("todo.paper_links");

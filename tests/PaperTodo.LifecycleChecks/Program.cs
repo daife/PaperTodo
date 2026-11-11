@@ -11,11 +11,23 @@ internal static class Program
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic;
     private const string FixtureMarker = ".papertodo-lifecycle-fixture";
-    private static readonly string[] Cases = ["startup", "missing-monitor", "master-queue-transfer", "master-queue-cancel", "master-queue-drag-preparation", "master-queue-drop-handoff", "master-queue-membership", "master-queue-mutations", "master-queue-hide", "master-queue-disconnect", "master-queue-merge", "master-queue-merge-collapsed", "master-queue-material-handoff", "controller-hide-create-reentry", "controller-hide-show-reentry", "controller-zorder-create-reentry", "controller-close-delete-reentry", "todo-visibility", "real-exit", "early-expand", "edge-expand-foreground", "cancel-prewarm", "real-exit-scripts", "early-exit", "todo-context-menu", "todo-multi-links", "todo-history"];
+    private static readonly string[] Cases = ["native-free-queue-review", "native-free-queues", "startup", "missing-monitor", "master-queue-transfer", "master-queue-cancel", "master-queue-drag-preparation", "master-queue-drop-handoff", "master-queue-membership", "master-queue-mutations", "master-queue-hide", "master-queue-hidden-retains-collapse", "master-queue-disconnect", "master-queue-merge", "master-queue-merge-collapsed", "master-queue-lightweight-handoff", "controller-hide-create-reentry", "controller-hide-show-reentry", "controller-zorder-create-reentry", "controller-close-delete-reentry", "todo-visibility", "real-exit", "early-expand", "edge-expand-foreground", "expanded-paper-display-recovery", "cancel-prewarm", "real-exit-scripts", "early-exit", "todo-context-menu", "todo-multi-links", "todo-history", "paper-bindings"];
 
     [STAThread]
     private static int Main(string[] args)
     {
+        // A renamed apphost launches this same fixture assembly as a plain app.
+        // Production can then reopen its captured executable without test arguments.
+        if (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "PaperTodo.BindingTarget")
+        {
+            var targetApp = new Application();
+            return targetApp.Run(new Window
+            {
+                Title = "PaperTodo binding fixture", Width = 360, Height = 260,
+                Left = SystemParameters.WorkArea.Left + 80,
+                Top = SystemParameters.WorkArea.Top + 100
+            });
+        }
         if (args is ["--sleep-child"])
         {
             Console.WriteLine("ready");
@@ -26,15 +38,20 @@ internal static class Program
         {
             if (!File.Exists(Path.Combine(AppContext.BaseDirectory, FixtureMarker)))
                 throw new InvalidOperationException("Refusing to use a non-fixture data directory.");
-            // Explicit shutdown can stop the Dispatcher before the awaiting caller resumes.
-            // Failures set the exit code directly; success does not depend on that continuation.
-            var result = 0;
+            // Ordinary fixtures must finish their assertions. Expected application exits
+            // acknowledge completion inside the fixture, before its awaiter may be stopped.
+            var result = 1;
+            var expectsProductExit = fixtureName.StartsWith("real-exit") || fixtureName == "early-exit";
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             app.Dispatcher.InvokeAsync(async () =>
             {
-                try { await RunFixture(fixtureName); result = 0; }
+                try { await RunFixture(fixtureName, () => result = 0); result = 0; }
                 catch (Exception ex) { result = 1; Console.Error.WriteLine(ex); }
-                finally { app.Shutdown(); }
+                finally
+                {
+                    // Successful exit fixtures must be shut down by the product itself.
+                    if (result != 0 || !expectsProductExit) app.Shutdown();
+                }
             });
             app.Exit += (_, _) => Console.WriteLine("WPF_EXIT_COMPLETED");
             app.Run();
@@ -86,10 +103,7 @@ internal static class Program
                 foreach (var childLine in text.Split('\n').Where(value => value.StartsWith("SCRIPT_CHILD ")))
                 {
                     var id = int.Parse(childLine["SCRIPT_CHILD ".Length..]);
-                    Process? script;
-                    try { script = Process.GetProcessById(id); }
-                    catch (ArgumentException) { continue; }
-                    using (script) Require(script.HasExited, "script survived real application exit");
+                    Require(ProcessHasExited(id), "script survived real application exit");
                 }
             }
             Console.WriteLine("PASS lifecycle " + name);
@@ -129,7 +143,7 @@ internal static class Program
         }
     }
 
-    private static async Task RunFixture(string name)
+    private static async Task RunFixture(string name, Action completeExpectedExit)
     {
         if (name == "todo-visibility")
         {
@@ -176,28 +190,46 @@ internal static class Program
             MasterQueueMembershipChecks.Prepare(state);
         if (name == "master-queue-drop-handoff")
             state.CapsuleCollapseAllActiveQueues["|" + DeepCapsuleSides.Right] = true;
-        if (name == "master-queue-material-handoff")
+        if (name == "master-queue-lightweight-handoff")
         {
             state.PaperSkin = PaperSkins.Acrylic;
-            state.MatchAuxiliaryMaterialStrength = true;
         }
         if (name.StartsWith("controller-"))
             state.CapsuleCollapseAllActiveQueues["|" + DeepCapsuleSides.Right] = true;
-        if (name is "todo-context-menu" or "todo-multi-links")
+        if (name is "todo-context-menu" or "paper-bindings" or "todo-multi-links")
             TodoContextMenuChecks.Prepare(state);
+        if (name == "paper-bindings")
+        {
+            state.ExperimentalWindowTethering = true;
+            state.TopBarPinnedCount = 1;
+        }
         if (name == "edge-expand-foreground")
             EdgeExpandForegroundChecks.Prepare(state);
+        if (name == "expanded-paper-display-recovery")
+            ExpandedPaperDisplayRecoveryChecks.Prepare(state);
+        if (name == "native-free-queues") NativeFreeQueueChecks.Prepare(state);
+        if (name == "native-free-queue-review") NativeFreeQueueReviewChecks.Prepare(state);
         var store = new StateStore();
         store.SaveJsonSync(store.SerializeState(state), 1);
         var controller = new AppController();
         var windows = (Dictionary<string, PaperWindow>)Field(controller, "_windows");
         var cache = MarkdownEdgePreviewPreload.For(Dispatcher.CurrentDispatcher);
-        var children = new List<Process>();
+        var children = new List<(Process Process, int Id)>();
         try
         {
             await controller.StartAsync(createDefaultPaper: false);
             await Dispatcher.CurrentDispatcher.InvokeAsync(static () => { }, DispatcherPriority.Render);
             var visible = windows.Values.Count(window => window.HasVisibleSurface);
+            if (name == "native-free-queues")
+            {
+                await NativeFreeQueueChecks.Run(controller, windows, store);
+                return;
+            }
+            if (name == "native-free-queue-review")
+            {
+                await NativeFreeQueueReviewChecks.Run(controller, windows, store);
+                return;
+            }
             if (name == "edge-expand-foreground")
             {
                 await EdgeExpandForegroundChecks.Run(controller, windows);
@@ -208,9 +240,19 @@ internal static class Program
                 await TodoContextMenuChecks.RunMultiLinks(controller, windows);
                 return;
             }
+            if (name == "expanded-paper-display-recovery")
+            {
+                await ExpandedPaperDisplayRecoveryChecks.Run(controller, windows);
+                return;
+            }
             if (name == "todo-context-menu")
             {
                 await TodoContextMenuChecks.Run(controller, windows);
+                return;
+            }
+            if (name == "paper-bindings")
+            {
+                await TodoContextMenuChecks.RunBindings(controller, windows);
                 return;
             }
             if (name == "missing-monitor")
@@ -236,7 +278,7 @@ internal static class Program
                 MasterQueueDropHandoffChecks.Run(controller);
                 return;
             }
-            if (name == "master-queue-material-handoff")
+            if (name == "master-queue-lightweight-handoff")
             {
                 await MasterMaterialHandoffChecks.Run(controller, windows);
                 return;
@@ -266,6 +308,11 @@ internal static class Program
                 MasterQueueDragPreparationChecks.Run(controller);
                 await Until(() => windows.Values.All(window => !window.IsCollapseAllRetracted),
                     "master drag cancelled during layout restored presentation");
+                return;
+            }
+            if (name == "master-queue-hidden-retains-collapse")
+            {
+                await MasterQueueMembershipChecks.RunVisibilityRetention(controller, windows, store);
                 return;
             }
             if (name == "master-queue-hide")
@@ -355,8 +402,24 @@ internal static class Program
                 Require(WindowWorkAreaHelper.TryGetMonitorGeometryForDevice(null, out var monitor),
                     "merge monitor geometry");
                 var drop = new DeviceScreenPoint(monitor.WorkArea.Left + 10, monitor.WorkArea.Top + 100);
+                double? haloCenterY = null;
+                if (targetCollapsed)
+                {
+                    controller.PreviewFreeMasterQueueDropGhost(transfer, drop);
+                    var ghost = typeof(AppController).GetField("_nativeQueueDropGhost", Private)!.GetValue(controller);
+                    var haloWindow = (Window)typeof(EdgeCapsuleQueueDropGhost).GetField("_window", Private)!.GetValue(ghost)!;
+                    Require(WindowNative.TryGetWindowDeviceBounds(haloWindow, out var bounds), "folded merge halo bounds");
+                    haloCenterY = monitor.DeviceYToLocalDip(bounds.Top + bounds.Height / 2.0);
+                }
                 Require(controller.CommitMasterCapsuleQueueTransfer(transfer, drop),
                     "master transfer into existing queue did not commit");
+                controller.EndFreeMasterQueueDropGhost();
+                if (haloCenterY is { } previewY)
+                {
+                    var targetMaster = controller.MasterCapsuleForQueue("", EdgeCapsuleEdge.Left)!;
+                    Require(Math.Abs(previewY - targetMaster.AnchorTop - PaperLayoutDefaults.CapsuleHeight / 2) <= 1 / monitor.DpiScaleY,
+                        "folded merge halo must be centered on the actual master landing");
+                }
                 var expectedOrder = new[] { "fixture-2", "fixture-3", "fixture-0", "fixture-1", "fixture-4" };
                 Require(controller.State.Papers.Select(paper => paper.Id).SequenceEqual(expectedOrder),
                     "merge did not append source members in their original order");
@@ -405,7 +468,7 @@ internal static class Program
                     "master drag did not temporarily retract the source queue");
                 Require(
                     controller.State.CapsuleCollapseAllActiveQueues.Count == 0,
-                    "temporary drag retraction changed persistent collapse state");
+                    "temporary master-drag retraction changed persistent collapse state");
 
                 Require(
                     WindowWorkAreaHelper.TryGetMonitorGeometryForDevice(
@@ -483,6 +546,8 @@ internal static class Program
             if (name == "early-exit")
             {
                 controller.Exit();
+                Require(!controller.IsRunning, "early application exit did not complete");
+                completeExpectedExit();
                 return;
             }
             if (name == "cancel-prewarm")
@@ -519,13 +584,13 @@ internal static class Program
                     "startup did not restore the requested visible papers");
             if (name == "real-exit-scripts")
             {
-                var registry = (IDictionary)typeof(PaperWindow).GetField("PersistentScriptProcesses", Private)!.GetValue(null)!;
+                var registry = (IDictionary)typeof(ScriptExecutionService).GetField("PersistentScriptProcesses", Private)!.GetValue(null)!;
                 for (var i = 0; i < 3; i++)
                 {
                     var start = ChildStart(AppContext.BaseDirectory);
                     start.ArgumentList.Add("--sleep-child");
                     var process = Process.Start(start)!;
-                    children.Add(process);
+                    children.Add((process, process.Id));
                     Console.WriteLine("SCRIPT_CHILD " + process.Id);
                     Require(await process.StandardOutput.ReadLineAsync() == "ready", "script fixture did not start");
                     registry.Add("fixture-script-" + i, process);
@@ -536,6 +601,10 @@ internal static class Program
                 var editor = Field(windows["fixture-0"], "_noteBox");
                 editor.GetType().GetProperty("Text")!.SetValue(editor, "pending editor text at exit");
                 controller.Exit();
+                Require(!controller.IsRunning, "application exit did not complete");
+                Require(children.All(child => ProcessHasExited(child.Id)),
+                    "script survived product exit before fixture cleanup");
+                completeExpectedExit();
                 return;
             }
             var surfaces = Application.Current.Windows.Cast<Window>().ToArray();
@@ -545,9 +614,23 @@ internal static class Program
         finally
         {
             controller.Dispose();
-            foreach (var process in children)
-                try { if (!process.HasExited) process.Kill(entireProcessTree: true); process.Dispose(); } catch { }
+            foreach (var (process, id) in children)
+            {
+                try
+                {
+                    using var remaining = Process.GetProcessById(id);
+                    if (!remaining.HasExited) remaining.Kill(entireProcessTree: true);
+                }
+                catch { }
+                finally { process.Dispose(); }
+            }
         }
+    }
+
+    private static bool ProcessHasExited(int id)
+    {
+        try { using var process = Process.GetProcessById(id); return process.HasExited; }
+        catch (ArgumentException) { return true; }
     }
 
     private static object Field(object target, string name) =>

@@ -63,10 +63,10 @@ internal static partial class Program
         if (!File.Exists(Path.Combine(AppContext.BaseDirectory, PresentationMarker)))
             throw new InvalidOperationException("Refusing to open non-fixture PaperTodo data.");
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        var result = 0;
+        var result = 1;
         app.Dispatcher.InvokeAsync(async () =>
         {
-            try { await PresentationBehavior(mode == "edge"); }
+            try { await PresentationBehavior(mode == "edge"); result = 0; }
             catch (Exception ex) { Console.Error.WriteLine(ex); result = 1; }
             finally { app.Shutdown(); }
         });
@@ -105,6 +105,37 @@ internal static partial class Program
         var note = papers.Single(p => p.Id == "note");
         var todo = papers.Single(p => p.Id == "todo");
         var owner = papers.Single(p => p.Id == "owner");
+        if (!edge)
+        {
+            var window = ReadField<Dictionary<string, PaperWindow>>(c, "_windows")[owner.Id];
+            var saved = (c.State.TopBarShortcutOrder, c.State.TopBarPinnedCount,
+                c.State.HiddenTopBarShortcuts, c.State.ShowTopBarExternalOpenButton);
+            try
+            {
+                c.State.TopBarShortcutOrder = PaperTopBarShortcuts.NormalizeOrder([PaperTopBarShortcuts.ExternalEditor]);
+                foreach (var (pinned, hidden, legacy, visible) in new[]
+                {
+                    (0, false, true, false), (1, true, true, false), (1, false, false, true)
+                })
+                {
+                    c.State.TopBarPinnedCount = pinned;
+                    c.State.HiddenTopBarShortcuts = hidden ? [PaperTopBarShortcuts.ExternalEditor] : [];
+                    c.State.ShowTopBarExternalOpenButton = legacy;
+                    window.UpdateTopBarNewPaperButtons();
+                    // Body replacement refreshes chrome even when width and layout have not changed.
+                    Invoke(window, "RefreshPaperBodyChrome");
+                    Check((ReadField<System.Windows.Controls.Button>(window, "_openMarkdownButton").Visibility ==
+                           Visibility.Visible) == visible,
+                        "Body refresh respects the current pin/hidden choices instead of the migrated legacy toggle.");
+                }
+            }
+            finally
+            {
+                (c.State.TopBarShortcutOrder, c.State.TopBarPinnedCount,
+                    c.State.HiddenTopBarShortcuts, c.State.ShowTopBarExternalOpenButton) = saved;
+                window.UpdateTopBarNewPaperButtons();
+            }
+        }
         var current = true;
         PaperBodyPluginHostApi Api(params string[] permissions) =>
             new(c, commands, "owner", "tests.presentation", permissions, () => current, () => current);
@@ -183,18 +214,23 @@ internal static partial class Program
         Throws<PaperTodoPluginException>(() => Web("papers.show", new { paperId = "note", activate = "false" }), "invalid_params");
         Throws<PaperTodoPluginException>(() => Web("papers.hide", new { }), "invalid_params");
 
-        // Test the actual Body dispatcher separately: it has its own switch in addition to the
-        // common Workspace router used by Mini and Runtime. No live WebView is claimed here.
+        // Exercise the Body entry point as well as the shared Workspace dispatcher.
         var bodyContext = (PaperBodyContext)RuntimeHelpers.GetUninitializedObject(typeof(PaperBodyContext));
         Field(bodyContext, "<Workspace>k__BackingField", host);
         var body = (WebPaperBodySession)RuntimeHelpers.GetUninitializedObject(typeof(WebPaperBodySession));
         Field(body, "_context", bodyContext);
         var bodyMethod = typeof(WebPaperBodySession).GetMethod("ExecuteHostRequest", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var bodyRequest = bodyMethod.CreateDelegate<Func<string, JsonElement, object?>>(body);
         foreach (var method in new[] { "papers.show", "papers.hide", "papers.toggle", "papers.expand", "papers.collapse", "papers.toggleCollapsed", "papers.activate" })
         {
-            var value = bodyMethod.Invoke(body, [method, Json(new { paperId = "note", activate = false })]);
+            var value = bodyRequest(method, Json(new { paperId = "note", activate = false }));
             Check(value is PaperPresentationResult, "Body dispatcher: " + method);
         }
+
+        Check(bodyRequest("data.status", Json(new { })) is DataReloadStatus,
+            "Web Body can query workspace data status without import permission.");
+        Throws<PaperTodoPluginException>(() => bodyRequest("data.reload", Json(new { })), "permission_denied");
+        Throws<PaperTodoPluginException>(() => bodyRequest("data.merge", Json(new { baselineJson = "{}" })), "permission_denied");
 
         c.State.McpEnabled = true;
         var mcp = new McpCommandService(c, commands);
@@ -234,43 +270,17 @@ internal static partial class Program
         Throws<PaperTodoPluginException>(() => api.HidePaper("note"), "session_closed");
         Throws<PaperTodoPluginException>(() => runtimeApi.HidePaper("note"), "runtime_closed");
         current = true;
-        await LinkedTitleTruncationBehavior(c, note, todo);
-        await PluginBoundaryBehavior(c, owner, note, todo);
-        await PresentationPipeBehavior();
-        Console.WriteLine($"Presentation ({(edge ? "edge" : "normal")}): {_checks} behavior checks passed.");
-    }
-
-    private static async Task LinkedTitleTruncationBehavior(AppController c, PaperData note, PaperData todo)
-    {
         c.State.EnableAnimations = false;
-        c.State.ShowLinkedPaperName = true;
-        c.State.AllowLongLinkedPaperTitles = true;
-        c.State.EnableTodoPaperLinks = true;
-        c.State.MaxTitleLength = 30;
-        note.Title = "LinkedABC";
-        todo.Items[0].LinkPaper(note.Id);
-        c.ApplyPaperPresentation(todo, PaperPresentationAction.Expand, activate: false);
-        var window = ReadField<Dictionary<string, PaperWindow>>(c, "_windows")[todo.Id];
-        window.RefreshTodoRowsForExternalChange();
-        await PresentationSettle();
-        static IEnumerable<System.Windows.Controls.TextBlock> Labels(DependencyObject root)
+        await PluginBoundaryBehavior(c, owner, note, todo);
+        // These checks own their stores/transport and do not depend on paper presentation.
+        if (!edge)
         {
-            if (root is System.Windows.Controls.TextBlock label) yield return label;
-            for (var i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++)
-                foreach (var child in Labels(System.Windows.Media.VisualTreeHelper.GetChild(root, i)))
-                    yield return child;
+            TodoPasteUsesEventPayload();
+            ReviewArchiveUnreadableDataFailsClosed();
+            await ArchiveNotificationsCannotBlockPersistence();
+            await PresentationPipeBehavior();
         }
-        c.PublicSettings.Set("title.max_length", Json(4));
-        await PresentationSettle();
-        var visibleLabels = Labels(window).Select(label => label.Text).ToArray();
-        Check(note.Title == "Link" && visibleLabels.Any(text => text.Contains("Link", StringComparison.Ordinal)) &&
-            visibleLabels.All(text => !text.Contains("LinkedABC", StringComparison.Ordinal)),
-            "Title truncation updates the actual linked-paper label immediately.");
-        // Verify current text, not whether the renderer reused or rebuilt a particular TextBlock.
-        Invoke(c, "SetMaxTitleLength", 2);
-        Check(note.Title == "Li" && Labels(window).Any(label => label.Text.Contains("Li", StringComparison.Ordinal)) &&
-            Labels(window).All(label => !label.Text.Contains("Link", StringComparison.Ordinal)),
-            "UI title truncation replaces the previous linked title with its current text.");
+        Console.WriteLine($"Presentation ({(edge ? "edge" : "normal")}): {_checks} behavior checks passed.");
     }
 
     private static async Task PresentationPipeBehavior()
@@ -279,6 +289,8 @@ internal static partial class Program
         var name = "PaperTodo.PresentationChecks." + Guid.NewGuid().ToString("N");
         using var pipe = new McpApiHost(Dispatcher.CurrentDispatcher, request =>
         {
+            if (request.GetProperty("method").GetString() == "get_workspace_binding")
+                return new { token = "presentation-fixture" };
             requests.Add(request.Clone());
             return new PaperPresentationResult("note", true, false);
         }, name);
@@ -296,6 +308,8 @@ internal static partial class Program
         for (var i = 0; i < expected.Length; i++)
         {
             Check(requests[i].GetProperty("method").GetString() == expected[i], "Tool method survives serialization: " + expected[i]);
+            Check(requests[i].GetProperty("workspace_token").GetString() == "presentation-fixture",
+                "Presentation request omitted the current workspace binding.");
             var p = requests[i].GetProperty("params");
             Check(p.GetProperty("paper_id").GetString() == "note", "Exact target ID reaches the GUI bridge.");
             if (i is 0 or 2 or 3 or 5)

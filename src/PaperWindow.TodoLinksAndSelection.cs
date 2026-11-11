@@ -81,6 +81,22 @@ public sealed partial class PaperWindow
 
     private void OnTodoSelectionWindowPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Back &&
+            Keyboard.Modifiers == ModifierKeys.None &&
+            _selectedTodoItemIds.Count > 1 &&
+            (ReferenceEquals(Keyboard.FocusedElement, _paperChrome) ||
+             Keyboard.FocusedElement is TodoTextBox { SelectionLength: 0 }))
+        {
+            // Whole-row selection is one list edit; text selection and other input
+            // fields retain their native Backspace behavior.
+            CancelTodoSweepSelection(clearSelection: false);
+            FocusTodoSweepSelectionHost();
+            _suppressTodoBackspaceUntilKeyUp = true;
+            DeleteSelectedTodoItems();
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key == Key.C &&
             Keyboard.Modifiers == ModifierKeys.Control &&
             TryCopySelectedTodoItems())
@@ -713,34 +729,19 @@ public sealed partial class PaperWindow
             return;
         }
 
-        var previousItems = CloneItems(_paper.Items);
+        var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
         PushUndoSnapshot();
 
         foreach (var item in selected)
         {
-            item.Done = done;
-            if (done)
-            {
-                item.ReminderAt = null;
-                item.ReminderTriggered = false;
-            }
+            TodoRules.SetDone(item, done);
         }
 
+        // Apply ordering to the entire selection once to keep its relative order.
+        TodoRules.ApplyCompletionPolicy(_paper.Items, selected.Select(item => item.Id).ToArray(),
+            done, _controller.State.AutoClearCompletedTodos, _controller.State.AutoMoveCompletedTodosToBottom);
         if (done && _controller.State.AutoClearCompletedTodos)
-        {
-            var selectedIds = selected.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
-            _paper.Items.RemoveAll(item => selectedIds.Contains(item.Id));
-            if (_paper.Items.Count == 0)
-            {
-                _paper.Items.Add(new PaperItem());
-            }
             _selectedTodoItemIds.Clear();
-        }
-        else
-        {
-            // Move the whole changed block once so batch completion keeps its relative order.
-            MoveTodoItemsAfterDoneChange(selected, done);
-        }
 
         NormalizeTodoItems();
         NormalizeOrders();
@@ -750,7 +751,7 @@ public sealed partial class PaperWindow
             done && _controller.State.AutoClearCompletedTodos
                 ? null
                 : selected.Select(item => item.Id));
-        RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
     }
 
     private void DeleteSelectedTodoItems()
@@ -761,22 +762,17 @@ public sealed partial class PaperWindow
             return;
         }
 
-        var previousItems = CloneItems(_paper.Items);
+        var previousLinkedPaperIds = CaptureLinkedPaperIds(_paper.Items);
         var selectedIds = selected.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         PushUndoSnapshot();
-        _paper.Items.RemoveAll(item => selectedIds.Contains(item.Id));
-        if (_paper.Items.Count == 0)
-        {
-            _paper.Items.Add(new PaperItem());
-        }
+        TodoRules.RemoveItems(_paper.Items, item => selectedIds.Contains(item.Id));
 
         _selectedTodoItemIds.Clear();
         NormalizeTodoItems();
-        NormalizeOrders();
         _controller.MarkDirty();
         _controller.NotifyTodoReminderCollectionChanged();
         ReconcileTodoRows();
-        RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
+        RefreshCapsuleEligibilityForLinkedPaperChanges(previousLinkedPaperIds);
     }
 
     private bool TryPopulateTodoSelectionContextMenu(

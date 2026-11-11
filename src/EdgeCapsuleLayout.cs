@@ -44,9 +44,9 @@ public static class EdgeCapsuleLayout
     // the same floating HWND, so their wall-return motion must not drift apart.
     internal const int DockingHandoffMilliseconds = 160;
     internal const int DockingRevealMilliseconds = 80;
-    // Display-weighted character count: CJK / fullwidth glyphs count as 2, everything
-    // else as 1. A 6-digit number title then weighs the same as a 3-CJK-character title,
-    // so the capsule no longer looks long-but-empty for numeric titles.
+    // Shared display-width units for title limits and compact linked-paper labels:
+    // CJK/fullwidth and supplementary Unicode glyphs count as 2; halfwidth as 1.
+    // Count text elements, not UTF-16 code units, to keep emoji sequences intact.
     public static int DisplayWidth(string? text)
     {
         if (string.IsNullOrEmpty(text))
@@ -72,8 +72,19 @@ public static class EdgeCapsuleLayout
         }
 
         var c = element[0];
-        // CJK Unified, Hiragana/Katakana, Hangul, fullwidth forms, CJK symbols/punct.
-        return (c >= 0x1100 && c <= 0x115F)   // Hangul Jamo
+        // Some BMP emoji need an emoji presentation selector (❤️) or a keycap mark (1️⃣).
+        // Others, such as clocks, dingbats and stars, render as emoji without selectors.
+        // CJK/fullwidth characters retain the existing width rules below.
+        return element.Contains('\uFE0F')    // Emoji presentation selector
+            || element.Contains('\u20E3')    // Combining enclosing keycap
+            || char.IsHighSurrogate(c)        // Supplementary symbols (including emoji)
+            || (c >= 0x231A && c <= 0x231B)   // Watch / hourglass
+            || (c >= 0x23E9 && c <= 0x23FA)   // Emoji controls / clock
+            || (c >= 0x25FB && c <= 0x27BF)   // Geometric emoji / symbols / dingbats
+            || (c >= 0x2B05 && c <= 0x2B07)   // Emoji arrows
+            || (c >= 0x2B1B && c <= 0x2B1C)   // Square emoji
+            || c == '\u2B50' || c == '\u2B55' // Star / circle emoji
+            || (c >= 0x1100 && c <= 0x115F)   // Hangul Jamo
             || (c >= 0x2E80 && c <= 0x303E)   // CJK radicals / Kangxi / symbols
             || (c >= 0x3041 && c <= 0x33FF)   // Hiragana, Katakana, CJK symbols
             || (c >= 0x3400 && c <= 0x4DBF)   // CJK Ext A
@@ -153,6 +164,78 @@ public static class EdgeCapsuleLayout
         return Math.Round(Math.Clamp(value, TopMargin, max), 1);
     }
 
+    // Free queues promise an exact anchor, even when a member extends beyond the work area.
+    // The legacy one-queue mode keeps its existing fit-to-monitor normalization.
+    internal static double FreeQueueTopForIndex(int index, double startTopMargin, Rect area, double gap) =>
+        area.Top + Math.Round(double.IsFinite(startTopMargin) ? startTopMargin : StartTopMargin, 1) +
+        Math.Max(0, index) * SlotHeight(gap);
+
     public static double SlotHeight(double gap) =>
         PaperLayoutDefaults.CapsuleHeight + Math.Max(0, gap);
+}
+
+internal readonly record struct EdgeCapsuleLayoutFacts(
+    MonitorGeometry Monitor,
+    EdgeCapsuleEdge Edge,
+    EdgeCapsulePlacement Placement,
+    double QueueStartTopMarginDip,
+    double GapDip,
+    double RestingWidthDip,
+    double MaximumCloseWidthDip,
+    double HeightDip,
+    double PreviewWidthDip,
+    double PreviewHeightDip,
+    bool CloseSegmentActsAsContent,
+    double RestingContentOpacity,
+    double? ForcedContentOpacity,
+    double HostCapacityWidthDip = 0,
+    double HostCapacityHeightDip = 0,
+    double ExpandedWidthDip = 0,
+    bool HideRestingTitle = false,
+    bool PreserveFreeQueueAnchor = false);
+
+/// <summary>
+/// Converts measured/environment facts into the planner snapshot. PaperWindow supplies target
+/// monitor and text width only; queue top policy lives here and is independently testable.
+/// </summary>
+internal static class EdgeCapsuleLayoutService
+{
+    public static EdgeCapsuleLayoutSnapshot Calculate(EdgeCapsuleLayoutFacts facts)
+    {
+        var placement = facts.Placement.Normalize();
+        var localWorkArea = facts.Monitor.LocalWorkAreaDip;
+        double Top(int index) => facts.PreserveFreeQueueAnchor
+            ? EdgeCapsuleLayout.FreeQueueTopForIndex(index, facts.QueueStartTopMarginDip, localWorkArea, facts.GapDip)
+            : EdgeCapsuleLayout.TopForIndex(index, facts.QueueStartTopMarginDip, localWorkArea, placement.SlotCount, facts.GapDip);
+        var normalTop = placement.IsPlaced ? Top(placement.VisualIndex) + placement.TopOffsetDip : 0;
+        var masterTop = placement.IsPlaced ? Top(0) : normalTop;
+        return new EdgeCapsuleLayoutSnapshot(
+            facts.Monitor,
+            facts.Edge,
+            normalTop,
+            masterTop,
+            facts.RestingWidthDip,
+            facts.MaximumCloseWidthDip,
+            facts.HeightDip,
+            facts.PreviewWidthDip,
+            facts.PreviewHeightDip,
+            facts.CloseSegmentActsAsContent,
+            facts.RestingContentOpacity,
+            facts.ForcedContentOpacity,
+            facts.HostCapacityWidthDip,
+            facts.HostCapacityHeightDip,
+            facts.ExpandedWidthDip,
+            facts.HideRestingTitle);
+    }
+
+    public static double TopForVisualIndex(
+        MonitorGeometry monitor,
+        int visualIndex,
+        int slotCount,
+        double queueStartTopMarginDip,
+        double gapDip,
+        bool preserveFreeQueueAnchor = false) =>
+        preserveFreeQueueAnchor
+            ? EdgeCapsuleLayout.FreeQueueTopForIndex(visualIndex, queueStartTopMarginDip, monitor.LocalWorkAreaDip, gapDip)
+            : EdgeCapsuleLayout.TopForIndex(visualIndex, queueStartTopMarginDip, monitor.LocalWorkAreaDip, slotCount, gapDip);
 }

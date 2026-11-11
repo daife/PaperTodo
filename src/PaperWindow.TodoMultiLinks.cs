@@ -17,7 +17,7 @@ public sealed partial class PaperWindow
         var additions = targets.Where(target => !item.HasQuickLaunchLink(target)).ToArray();
         if (additions.Length == 0) return;
         var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
-        var before = CloneItems(_paper.Items);
+        var before = CaptureLinkedPaperIds(_paper.Items);
         PushUndoSnapshot();
         item.RestoreQuickLaunchLinks(item.GetQuickLaunchLinks().Concat(additions).ToArray());
         _controller.MarkDirty();
@@ -28,7 +28,7 @@ public sealed partial class PaperWindow
     private void RemoveTodoLink(PaperItem item, TodoQuickLaunchLink link)
     {
         var focusedId = CurrentFocusedTodoItemId() ?? item.Id;
-        var before = CloneItems(_paper.Items);
+        var before = CaptureLinkedPaperIds(_paper.Items);
         PushUndoSnapshot();
         item.RemoveQuickLaunchLink(link);
         _controller.MarkDirty();

@@ -52,6 +52,7 @@ public sealed partial class AppController
             item.ReminderAt)
         {
             LinkedPathIsDirectory = item.LinkedPathIsDirectory,
+            ReminderTriggered = item.ReminderTriggered,
             Links = item.GetQuickLaunchLinks().Select(link => new TodoLinkSnapshot(
                 link.PaperId, link.Path, link.IsDirectory)).ToArray()
         };
@@ -68,7 +69,7 @@ public sealed partial class AppController
             PaperTitleText(paper),
             paper.BodyProviderId,
             contentAvailable,
-            contentAvailable ? paper.Content ?? "" : "");
+            contentAvailable ? CurrentMarkdownContentForExternalRead(paper) : "");
     }
 
     internal void PrepareExternalPaperOperation(PaperData? targetPaper = null)
@@ -128,11 +129,7 @@ public sealed partial class AppController
             attemptedVersion = version;
             var json = _store.SerializeState(State);
             _store.SaveJsonSync(json, version);
-            if (!hasPendingMarkdown && !IsExiting)
-            {
-                TryReleaseUnreferencedImageCache();
-            }
-            TryFlushPendingPluginPaperStateDeletes();
+            CompleteStateSaveMaintenance(releaseImageCache: !hasPendingMarkdown);
             _hasShownSaveFailure = false;
 
             // Post-save cleanup can synchronously invoke Runtime Paper callbacks. If one of those
@@ -156,11 +153,11 @@ public sealed partial class AppController
 
     internal void RecordExternalTodoMutationUndoStep(
         PaperData paper,
-        IReadOnlyList<PaperItem> before)
+        List<PaperItem> snapshot)
     {
         if (_windows.TryGetValue(paper.Id, out var window))
         {
-            window.RecordExternalTodoMutationAsUndoStep(before);
+            window.RecordExternalTodoMutationAsUndoStep(snapshot);
         }
     }
 
@@ -197,6 +194,9 @@ public sealed partial class AppController
         string providerId)
     {
         PrepareExternalPaperOperation(paper);
+        if (!ReferenceEquals(FindPluginRuntimePaper(providerId, paper.Id), paper))
+            throw new PaperTodoPluginException("paper_not_owned",
+                "The requested Paper is not an instance of this plugin Runtime.");
         using (SuppressPaperPluginEventScans())
         {
             UpdatePaperTitle(paper, title);
@@ -209,14 +209,6 @@ public sealed partial class AppController
         if (string.IsNullOrWhiteSpace(paperId))
         {
             return;
-        }
-
-        // Both user and external deletion reach this point only after the Paper has left the
-        // authoritative state (and external deletion has already saved successfully). A deleted
-        // Paper id must not survive only inside a live Todo window's undo/redo snapshots.
-        foreach (var window in _windows.Values)
-        {
-            window.PruneDeletedLinkedPaperFromTodoHistory(paperId);
         }
 
         _pendingPluginPaperStateDeletes.Add(paperId);
@@ -261,10 +253,6 @@ public sealed partial class AppController
                 // later successful save without converting it into a core save failure.
             }
         }
-
-        // Deletion is committed before this cleanup pass. Reconcile from the final entity-paper
-        // set so the provider Runtime loses deleted logical Paper instances promptly.
-        ReconcilePluginRuntimes();
     }
 
     internal void DisposePaperPluginHostRuntime()

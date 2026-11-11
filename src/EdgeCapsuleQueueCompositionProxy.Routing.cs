@@ -3,17 +3,57 @@ using Vortice.DirectComposition;
 
 namespace PaperTodo;
 
+// The position and modifier state belong to the original native message, not to the later
+// handoff callback. ScreenPoint is converted once, while the output HWND is still unchanged.
+internal readonly record struct EdgeCapsulePointerDown(
+    DeviceScreenPoint ScreenPoint, int Message, IntPtr KeyState);
+
+// One native press may wait only for the synchronous authority-release attempt that it triggered.
+// If that attempt schedules any retry, the press is dropped; old input is never replayed later.
+internal sealed class EdgeCapsuleInputHandoff
+{
+    private sealed record Pending(Func<bool> IsCurrent, Action Deliver);
+    private Pending? _pending;
+    internal int Count => _pending == null ? 0 : 1;
+
+    internal void Enqueue(Func<bool> isCurrent, Action deliver) =>
+        _pending = new Pending(isCurrent, deliver);
+
+    internal void Complete()
+    {
+        var pending = _pending;
+        _pending = null; // Remove ownership BEFORE callbacks can re-enter completion.
+        if (pending == null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (pending.IsCurrent()) pending.Deliver();
+        }
+        catch (Exception error)
+        {
+            Trace.TraceWarning("Edge input transfer failed: {0}", error);
+        }
+    }
+
+    // ScheduleCompletionRetry calls this before arming the retry. A press belongs only to the
+    // original synchronous handoff attempt; any retry deliberately drops it instead of replaying it.
+    internal void Prune() => Cancel();
+    internal void Cancel() => _pending = null;
+}
+
 internal sealed partial class EdgeCapsuleQueueCompositionProxy
 {
+    private EdgeCapsuleInputHandoff? _inputHandoff;
+
     private const int MaximumCompletionRetryCount = 2;
 
     // A queue generation that enters or leaves DockedRetracted is the master collapse-all/release
     // animation. It is purely visual: the master owns the gesture, and moving proxy pixels must
     // never become a temporary mouse owner for the desktop or another application.
-    private bool RoutesPointerInput =>
-        !_plan.Members.Any(member =>
-            member.Start.Surface == EdgeCapsuleSurfaceKind.DockedRetracted ||
-            member.Target.Surface == EdgeCapsuleSurfaceKind.DockedRetracted);
+    private bool RoutesPointerInput => EdgeCapsuleQueueProxyPolicy.RoutesPointerInput(_plan);
 
     // The plan's pointer role is stable, but native messages can re-enter while a cover is
     // being published/replaced or released. All input entry points share this readiness boundary.
@@ -32,7 +72,7 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
         return _visuals.Any(state =>
         {
             var member = state.Member;
-            if (!member.Window.CanRouteEdgeCapsuleQueueProxyInput)
+            if (!member.CanRouteInput)
             {
                 return false;
             }
@@ -58,9 +98,11 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
         {
             return;
         }
+        DeviceScreenPoint? pointer = WindowNative.TryGetCursorScreenPosition(out var current) ? current : null;
         foreach (var member in _members)
         {
-            member.Window.InvalidateEdgeCapsuleQueueProxyPointer();
+            if (member.Window is PaperWindow paper)
+                paper.InvalidateEdgeCapsuleQueueProxyPointer(pointer);
         }
     }
 
@@ -71,7 +113,7 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
     }
 
     internal bool TryGetPresentationAt(
-        PaperWindow window,
+        System.Windows.Window window,
         long timestamp,
         out EdgeCapsulePresentationFrame frame)
     {
@@ -88,7 +130,7 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
     }
 
     public bool TryGetPresentation(
-        PaperWindow window,
+        System.Windows.Window window,
         out EdgeCapsulePresentationFrame frame) =>
         TryGetPresentationAt(
             window,
@@ -96,7 +138,7 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
             out frame);
 
     public bool TryGetSourcePresentation(
-        PaperWindow window,
+        System.Windows.Window window,
         out EdgeCapsulePresentationFrame frame)
     {
         var member = _members.FirstOrDefault(candidate =>
@@ -113,19 +155,19 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
         return frame.IsUsable;
     }
 
-    public bool RetainsSource(PaperWindow window) =>
+    public bool RetainsSource(System.Windows.Window window) =>
         !_disposed &&
         !_sourcesReleased &&
         _members.Any(member =>
             ReferenceEquals(member.Window, window) &&
             member.SourceHandle != IntPtr.Zero);
 
-    public bool Routes(PaperWindow window) =>
+    public bool Routes(System.Windows.Window window) =>
         !_disposed &&
         _members.Any(member =>
             ReferenceEquals(member.Window, window));
 
-    public IntPtr SourceHandleFor(PaperWindow window) =>
+    public IntPtr SourceHandleFor(System.Windows.Window window) =>
         _members.FirstOrDefault(member =>
             ReferenceEquals(member.Window, window))
             ?.SourceHandle ?? IntPtr.Zero;
@@ -230,7 +272,7 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
         foreach (var state in _visuals)
         {
             var member = state.Member;
-            if (!member.Window.CanRouteEdgeCapsuleQueueProxyInput)
+            if (!member.CanRouteInput)
             {
                 continue;
             }
@@ -368,6 +410,19 @@ internal sealed partial class EdgeCapsuleQueueCompositionProxy
                 ex);
             ScheduleCompletionRetry(success: false);
         }
+    }
+
+    internal void DeferPointerDown(Func<bool> isCurrent, Action deliver) =>
+        (_inputHandoff ??= new()).Enqueue(isCurrent, deliver);
+
+    internal void CompleteDeferredPointerInput()
+    {
+        if (_coverLost)
+        {
+            _inputHandoff?.Cancel();
+            return;
+        }
+        _inputHandoff?.Complete();
     }
 
     public void ScheduleCompletionRetry(bool success)

@@ -386,7 +386,9 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
                     try { listener(message.event); } catch { }
                   }
                 } else if (message?.type === 'hostSubscriptionError') {
-                  hostEventListeners.delete(message.subscriptionId);
+                  if (!message.existingSubscriptionRetained) {
+                    hostEventListeners.delete(message.subscriptionId);
+                  }
                 }
                 for (const listener of [...listeners]) {
                   try { listener(message); } catch { }
@@ -427,7 +429,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
             _activeDocumentToken = null;
         }
         _documentGeneration++;
-        ClearHostSubscriptions();
+        ResetDocumentResources();
         _documentReady = false;
         _pluginDocumentReady = false;
     }
@@ -548,7 +550,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
             _activeDocumentToken = null;
             _departingDocumentToken = null;
             _documentGeneration++;
-            ClearHostSubscriptions();
+            ResetDocumentResources();
         }
         webView.Loaded -= OnWebViewLoaded;
         webView.SizeChanged -= OnWebViewSizeChanged;
@@ -754,89 +756,13 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         }
     }
 
-    private object? ExecuteHostRequest(string method, JsonElement parameters)
-    {
-        if (string.Equals(method, "runtime.post", StringComparison.Ordinal))
-        {
-            var message = parameters.ValueKind == JsonValueKind.Object &&
-                          parameters.TryGetProperty("message", out var messageValue)
-                ? messageValue
-                : default;
-            if (!_context.Runtime.Post(
-                    message.ValueKind == JsonValueKind.Undefined
-                        ? JsonSerializer.SerializeToElement<object?>(null)
-                        : message.Clone()))
-            {
-                throw new PaperTodoPluginException(
-                    "runtime_unavailable",
-                    "The plugin Runtime is not ready to accept this message.");
-            }
-            return null;
-        }
-
-        return method switch
-        {
-        "appSettings.list" or
-        "appSettings.get" or
-        "appSettings.set" =>
-            WebPluginWorkspaceRequests.Execute(_context.Host, method, parameters),
-        "papers.show" or
-        "papers.hide" or
-        "papers.toggle" or
-        "papers.expand" or
-        "papers.collapse" or
-        "papers.toggleCollapsed" or
-        "papers.activate" =>
-            WebPluginWorkspaceRequests.Execute(_context.Host, method, parameters),
-        "papers.list" => _context.Host.ListPapers(OptionalPayloadString(parameters, "type")),
-        "papers.get" => _context.Host.GetPaper(PayloadString(parameters, "paperId")),
-        "todos.list" => _context.Host.ListTodos(
-            OptionalPayloadString(parameters, "paperId"),
-            OptionalPayloadBoolean(parameters, "includeBlank") ?? false),
-        "notes.get" => _context.Host.GetNote(PayloadString(parameters, "paperId")),
-        "noteAssets.readImage" => WebPluginWorkspaceRequests.Execute(_context.Host, method, parameters),
-        "popups.open" or "popups.close" => WebPluginPopupRequests.Execute(
-            _context.Popups, _context.Host, _manifest, method, parameters, message => Send(message)),
-        "papers.create" => _context.Host.CreatePaper(
-            DeserializePayload<CreatePaperRequest>(parameters)),
-        "todos.append" => _context.Host.AppendTodos(
-            DeserializePayload<AppendTodosRequest>(parameters)),
-        "todos.update" => _context.Host.UpdateTodo(
-            DeserializePayload<UpdateTodoRequest>(parameters)),
-        "todos.setReminder" => _context.Host.SetTodoReminder(
-            DeserializePayload<SetTodoReminderRequest>(parameters)),
-        "notes.write" => _context.Host.WriteNote(
-            DeserializePayload<WriteNoteRequest>(parameters)),
-        "todos.delete" => _context.Host.DeleteTodo(
-            DeserializePayload<DeleteTodoRequest>(parameters)),
-        "papers.delete" => _context.Host.DeletePaper(
-            PayloadString(parameters, "paperId")),
-        "paper.show" or
-        "paper.hide" or
-        "paper.toggle" or
-        "paper.expand" or
-        "paper.collapse" or
-        "paper.toggleCollapsed" or
-        "paper.activate" => ExecutePaperPresentationHostRequest(method, parameters),
-        "topbar.paper.set" => SetPaperTopBarActionsFromWeb(parameters),
-        "topbar.global.set" => SetGlobalTopBarActionsFromWeb(parameters),
-            _ => throw new PaperTodoPluginException(
-                "method_not_found",
-                $"Unknown PaperTodo plugin host method: {method}")
-        };
-    }
-
     private void HandleSubscribeHostEvents(JsonElement payload)
     {
         var subscriptionId = PayloadString(payload, "subscriptionId");
         var documentGeneration = _documentGeneration;
         try
         {
-            if (_hostSubscriptions.Remove(subscriptionId, out var existing))
-            {
-                existing.Dispose();
-            }
-            _hostSubscriptions[subscriptionId] = _context.Host.Subscribe(
+            var replacement = _context.Host.Subscribe(
                 new PaperTodoEventFilter
                 {
                     Kinds = ReadEventKinds(payload),
@@ -859,6 +785,9 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
                         @event = eventJson
                     });
                 });
+            _hostSubscriptions.TryGetValue(subscriptionId, out var existing);
+            _hostSubscriptions[subscriptionId] = replacement;
+            existing?.Dispose();
         }
         catch (PaperTodoPluginException ex)
         {
@@ -866,6 +795,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
             {
                 type = "hostSubscriptionError",
                 subscriptionId,
+                existingSubscriptionRetained = _hostSubscriptions.ContainsKey(subscriptionId),
                 error = new { code = ex.Code, message = ex.Message }
             });
         }
@@ -880,9 +810,14 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         }
     }
 
-    private void ClearHostSubscriptions()
+    private void ResetDocumentResources()
     {
         (_context.Host as PaperBodyPluginHostApi)?.ResetExtensionUi();
+        ClearHostSubscriptions();
+    }
+
+    private void ClearHostSubscriptions()
+    {
         foreach (var subscription in _hostSubscriptions.Values)
         {
             try { subscription.Dispose(); } catch { }
@@ -890,7 +825,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         _hostSubscriptions.Clear();
     }
 
-    private static HashSet<PaperTodoEventKind> ReadEventKinds(JsonElement payload)
+    internal static HashSet<PaperTodoEventKind> ReadEventKinds(JsonElement payload)
     {
         if (payload.ValueKind != JsonValueKind.Object ||
             !payload.TryGetProperty("types", out var values) ||
@@ -909,6 +844,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
                 "paper.deleted" => PaperTodoEventKind.PaperDeleted,
                 "todo.created" => PaperTodoEventKind.TodoCreated,
                 "todo.changed" => PaperTodoEventKind.TodoChanged,
+                "todo.reminderUpcoming" => PaperTodoEventKind.TodoReminderUpcoming,
                 "todo.deleted" => PaperTodoEventKind.TodoDeleted,
                 "note.changed" => PaperTodoEventKind.NoteChanged,
                 var unknown => throw new PaperTodoPluginException(
@@ -925,7 +861,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         return result;
     }
 
-    private static HashSet<string>? ReadStringSet(JsonElement payload, string name)
+    internal static HashSet<string>? ReadStringSet(JsonElement payload, string name)
     {
         if (payload.ValueKind != JsonValueKind.Object ||
             !payload.TryGetProperty(name, out var values) ||
@@ -1016,7 +952,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         _activeDocumentToken = null;
         _departingDocumentToken = null;
         _documentGeneration++;
-        ClearHostSubscriptions();
+        ResetDocumentResources();
         ShowFailure(Strings.Format("PluginsWebProcessFailedFormat", e.ProcessFailedKind));
     }
 
@@ -1113,7 +1049,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         _activeDocumentToken = null;
         _departingDocumentToken = null;
         _documentGeneration++;
-        ClearHostSubscriptions();
+        ResetDocumentResources();
         _documentReady = false;
         _pluginDocumentReady = false;
         _webViewFailed = true;
@@ -1261,18 +1197,6 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         return $"{safe}.papertodo.local";
     }
 
-    internal void ApplyExternalState(string stateJson)
-    {
-        var normalized = string.IsNullOrWhiteSpace(stateJson) ? "{}" : stateJson;
-        if (string.Equals(_stateJson, normalized, StringComparison.Ordinal))
-        {
-            return;
-        }
-        _stateJson = normalized;
-        SendStateChanged();
-        _miniViewHost?.SendStateChanged();
-    }
-
     internal bool ReceiveRuntimeMessage(JsonElement payload)
     {
         if (_disposed || _webViewFailed)
@@ -1382,7 +1306,7 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         _activeDocumentToken = null;
         _departingDocumentToken = null;
         _documentGeneration++;
-        ClearHostSubscriptions();
+        ResetDocumentResources();
         _pendingRuntimeMessages.Clear();
         _lifetime.Cancel();
         _webViewGeneration++;
@@ -1390,3 +1314,4 @@ internal sealed partial class WebPaperBodySession : IPaperBodySession
         _lifetime.Dispose();
     }
 }
+

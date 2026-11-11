@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -400,25 +399,8 @@ public sealed partial class AppController
             Strings.Get("SettingsDistinguishNumpadShortcutDigits"),
             State.DistinguishNumpadShortcutDigits,
             ToggleDistinguishNumpadShortcutDigits);
-        distinguishNumpadToggle.Content = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Children =
-            {
-                new TextBlock
-                {
-                    Text = Strings.Get("SettingsDistinguishNumpadShortcutDigits"),
-                    Foreground = TrayTextBrush,
-                    FontSize = AppTypography.Scale(13),
-                    VerticalAlignment = VerticalAlignment.Center
-                },
-                CreateSettingsHintGlyph(
-                    "TipSettingsDistinguishNumpadShortcutDigits",
-                    new Thickness(4, 0, 0, 0))
-            }
-        };
-        rows.Children.Add(distinguishNumpadToggle);
+        rows.Children.Add(WrapWithHint(
+            distinguishNumpadToggle, "TipSettingsDistinguishNumpadShortcutDigits"));
 
         var edgeQueueTipLabelWidth = MeasureShortcutTipLabelMinWidth(
             (Strings.Get("ShortcutEdgeLeftSequence"), AppTypography.Scale(12.5), FontWeights.Normal),
@@ -439,23 +421,8 @@ public sealed partial class AppController
             Strings.Get("SettingsOpenEdgeCapsuleShortcutAtCursor"),
             State.OpenEdgeCapsuleShortcutAtCursor,
             ToggleOpenEdgeCapsuleShortcutAtCursor);
-        openAtCursorToggle.Content = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Children =
-            {
-                new TextBlock
-                {
-                    Text = Strings.Get("SettingsOpenEdgeCapsuleShortcutAtCursor"),
-                    Foreground = TrayTextBrush,
-                    FontSize = AppTypography.Scale(13),
-                    VerticalAlignment = VerticalAlignment.Center
-                },
-                CreateSettingsHintGlyph("TipOpenEdgeCapsuleShortcutAtCursor", new Thickness(4, 0, 0, 0))
-            }
-        };
-        rows.Children.Add(openAtCursorToggle);
+        rows.Children.Add(WrapWithHint(
+            openAtCursorToggle, "TipOpenEdgeCapsuleShortcutAtCursor"));
 
         root.Children.Add(rows);
 
@@ -915,6 +882,9 @@ public sealed partial class AppController
             Background = Brushes.Transparent,
             Foreground = TrayTextBrush,
             FontSize = AppTypography.Scale(12),
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
             Cursor = Cursors.Hand,
             Focusable = false,
             Style = BuildSettingsCloseButtonStyle()
@@ -1310,134 +1280,4 @@ public sealed partial class AppController
         }
         ClearShortcutApplyFailure();
     }
-
-    private void ActivateEdgeCapsuleShortcut(string preferredSide, int ordinal)
-    {
-        if (HasDeepCapsuleReorderDragInProgress() ||
-            ordinal is < 1 or > 9 ||
-            !State.UseCapsuleMode ||
-            !State.UseDeepCapsuleMode)
-        {
-            return;
-        }
-
-        var papers = DeepCapsulePapersInOrder();
-        if (papers.Count == 0)
-        {
-            return;
-        }
-
-        var normalizedPreferredSide = DeepCapsuleSides.Normalize(preferredSide);
-        var oppositeSide = normalizedPreferredSide == DeepCapsuleSides.Left
-            ? DeepCapsuleSides.Right
-            : DeepCapsuleSides.Left;
-        var queuePlan = EdgeCapsuleQueueCoordinator.Build(
-            papers.Select(paper => new EdgeCapsuleQueueMember(paper, QueueKey(paper))),
-            State.UseCapsuleCollapseAll);
-        var queuesByKey = queuePlan.Queues.ToDictionary(queue => queue.Key, StringComparer.Ordinal);
-
-        foreach (var monitorName in EdgeShortcutMonitorSearchOrder())
-        {
-            foreach (var side in new[] { normalizedPreferredSide, oppositeSide })
-            {
-                var queueKey = QueueKey(monitorName, side);
-                if (!queuesByKey.TryGetValue(queueKey, out var queue) || queue.Papers.Count < ordinal)
-                {
-                    continue;
-                }
-
-                var target = queue.Papers[ordinal - 1];
-                if (_windows.TryGetValue(target.Id, out var window))
-                {
-                    window.ActivateFromEdgeShortcut();
-                }
-                return;
-            }
-        }
-    }
-
-    private static IReadOnlyList<string> EdgeShortcutMonitorSearchOrder()
-    {
-        var currentMonitor = "";
-        if (WindowNative.TryGetCursorScreenPosition(out var cursor) &&
-            WindowWorkAreaHelper.MonitorAtDeviceScreenPoint(cursor) is { } cursorMonitor)
-        {
-            currentMonitor = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(cursorMonitor.DeviceName);
-        }
-
-        var connectedMonitors = WindowWorkAreaHelper.ConnectedMonitorGeometries();
-        var candidateNames = connectedMonitors
-            .Select(monitor => WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(monitor.DeviceName))
-            .Append(currentMonitor)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        if (!WindowWorkAreaHelper.TryGetMonitorGeometryForDevice(currentMonitor, out var currentGeometry))
-        {
-            return candidateNames;
-        }
-
-        var currentCenterX = (currentGeometry.WorkArea.Left + currentGeometry.WorkArea.Right) / 2.0;
-        var currentCenterY = (currentGeometry.WorkArea.Top + currentGeometry.WorkArea.Bottom) / 2.0;
-        var candidates = connectedMonitors
-            .Select(geometry => (
-                Name: WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(geometry.DeviceName),
-                Geometry: geometry))
-            .Where(candidate => !string.Equals(candidate.Name, currentMonitor, StringComparison.Ordinal))
-            .ToList();
-
-        static double CenterX(MonitorGeometry geometry) =>
-            (geometry.WorkArea.Left + geometry.WorkArea.Right) / 2.0;
-        static double CenterY(MonitorGeometry geometry) =>
-            (geometry.WorkArea.Top + geometry.WorkArea.Bottom) / 2.0;
-
-        var left = candidates
-            .Where(candidate => CenterX(candidate.Geometry) < currentCenterX - 0.5)
-            .OrderBy(candidate => currentCenterX - CenterX(candidate.Geometry))
-            .ThenBy(candidate => Math.Abs(currentCenterY - CenterY(candidate.Geometry)))
-            .ToList();
-        var right = candidates
-            .Where(candidate => CenterX(candidate.Geometry) > currentCenterX + 0.5)
-            .OrderBy(candidate => CenterX(candidate.Geometry) - currentCenterX)
-            .ThenBy(candidate => Math.Abs(currentCenterY - CenterY(candidate.Geometry)))
-            .ToList();
-        var vertical = candidates
-            .Where(candidate => Math.Abs(CenterX(candidate.Geometry) - currentCenterX) <= 0.5)
-            .OrderBy(candidate => Math.Abs(currentCenterY - CenterY(candidate.Geometry)))
-            .ToList();
-
-        var ordered = new List<string>(candidateNames.Count) { currentMonitor };
-        var horizontalDepth = Math.Max(left.Count, right.Count);
-        for (var index = 0; index < horizontalDepth; index++)
-        {
-            if (index < left.Count)
-            {
-                ordered.Add(left[index].Name);
-            }
-            if (index < right.Count)
-            {
-                ordered.Add(right[index].Name);
-            }
-        }
-        ordered.AddRange(vertical.Select(candidate => candidate.Name));
-        return ordered;
-    }
-
-    private UIElement CreateDeepCapsuleTitleMeasureLimitStepper() =>
-        CreateSettingsStepper(
-            DeepCapsuleTitleMeasureLimitText,
-            () => SetDeepCapsuleTitleMeasureCharacterLimit(EdgeCapsuleTitleLimit.Step(
-                State.DeepCapsuleTitleMeasureCharacterLimit, increase: false)),
-            () => SetDeepCapsuleTitleMeasureCharacterLimit(EdgeCapsuleTitleLimit.Step(
-                State.DeepCapsuleTitleMeasureCharacterLimit, increase: true)));
-
-    private string DeepCapsuleTitleMeasureLimitText()
-    {
-        var limit = State.DeepCapsuleTitleMeasureCharacterLimit;
-        return limit == EdgeCapsuleTitleLimit.Unlimited
-            ? Strings.Get("SettingsAllCharacters")
-            : (limit == EdgeCapsuleTitleLimit.Hidden ? 0 : limit).ToString(CultureInfo.InvariantCulture);
-    }
-
-    private void SetDeepCapsuleTitleMeasureCharacterLimit(int value) =>
-        SetSettingFromUi("capsule.title_measure_limit", EdgeCapsuleTitleLimit.Normalize(value));
 }

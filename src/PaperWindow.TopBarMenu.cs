@@ -62,6 +62,8 @@ public sealed partial class PaperWindow
         PaperTopBarShortcuts.ExternalEditor => _openMarkdownButton,
         PaperTopBarShortcuts.NewTodo => _newTodoButton,
         PaperTopBarShortcuts.NewNote => _newNoteButton,
+        PaperTopBarShortcuts.Workspace => _workspaceButton,
+        PaperTopBarShortcuts.RunScript => _runScriptButton,
         _ => null
     };
 
@@ -71,10 +73,14 @@ public sealed partial class PaperWindow
 
     private MenuItem BuildAssociationDragMenuItem(ContextMenu menu)
     {
+        var todo = CanBeginPaperLinkDrag();
+        var window = CanBeginWindowBindingDrag();
+        var hint = todo && window ? "MenuTopBarAssociationDrag" :
+            todo ? "MenuTopBarAssociationDragTodo" : "MenuTopBarAssociationDragWindow";
         var item = new MenuItem
         {
-            Header = Strings.Get("MenuTopBarAssociationDrag"),
-            ToolTip = AssociationDragHint(),
+            Header = Strings.Get("MenuAssociationTarget"),
+            ToolTip = Strings.Get(hint),
             Padding = new Thickness(8, 4, 10, 4),
             StaysOpenOnClick = true
         };
@@ -89,6 +95,11 @@ public sealed partial class PaperWindow
     private bool ShouldShowPinnedHostButton(Button button)
     {
         var state = _controller.State;
+        if (ReferenceEquals(button, _runScriptButton))
+            return PaperTopBarShortcuts.Contains(state, _paper.Type, PaperTopBarShortcuts.RunScript);
+        if (ReferenceEquals(button, _workspaceButton))
+            return _controller.WorkspaceOptions.Enabled &&
+                PaperTopBarShortcuts.Contains(state, _paper.Type, PaperTopBarShortcuts.Workspace);
         if (ReferenceEquals(button, _windowBindingButton))
             return PaperTopBarShortcuts.Contains(state, _paper.Type, PaperTopBarShortcuts.Association) &&
                 (state.EnableTodoPaperLinks || state.ExperimentalWindowTethering);

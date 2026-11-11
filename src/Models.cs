@@ -100,23 +100,6 @@ public static class FullscreenTopmostModes
     }
 }
 
-/// <summary>
-/// Paper ResizeGrip presentation: system-contrast corner dots, or hidden dots with edge resizing.
-/// </summary>
-public static class ResizeGripModes
-{
-    public const string Standard = "standard";
-    public const string Soft = "soft";
-    public const string Hidden = "hidden";
-
-    public static string Normalize(string? mode) => mode switch
-    {
-        Standard => Standard,
-        Hidden => Hidden,
-        _ => Soft
-    };
-}
-
 public static class DeepCapsuleSides
 {
     public const string Left = "left";
@@ -355,17 +338,6 @@ public static class ExperimentalWindowTetherOptions
     }
 }
 
-public static class ExperimentalTetherVisibilityModes
-{
-    public const string Hide = "hide";
-    public const string Capsule = "capsule";
-
-    public static string Normalize(string? mode)
-    {
-        return mode == Capsule ? Capsule : Hide;
-    }
-}
-
 public static class UiFontPresets
 {
     public const string Default = "default";
@@ -453,10 +425,14 @@ public readonly record struct TodoVisualMetrics(
 
 public sealed class AppState
 {
+    // The unnumbered data.json is the sole owner; absent in legacy and numbered documents.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorkspaceConfiguration? Workspaces { get; set; }
     [JsonRequired]
     public List<PaperData> Papers { get; set; } = new();
     [JsonPropertyOrder(-100)]
     public string UiLanguage { get; set; } = UiLanguages.Default;
+    public string DataMergeConflictPolicy { get; set; } = DataMergeConflictPolicies.Ask;
     public string Theme { get; set; } = "system";
     public string ColorScheme { get; set; } = ColorSchemes.Warm;
     // Null is the legacy migration sentinel; an explicit "paper" never implies Mica.
@@ -464,7 +440,6 @@ public sealed class AppState
     public string MaterialTransparency { get; set; } = MaterialTransparencyLevels.Medium;
     // Hides only the ordinary outer stroke. Active/focus capsule outlines stay separate.
     public bool HideSurfaceOutline { get; set; } = false;
-    public bool MatchAuxiliaryMaterialStrength { get; set; }
     public string MicaBackdropType { get; set; } = MicaBackdropTypes.Mica;
     public bool MicaAlwaysActive { get; set; }
     [System.Diagnostics.CodeAnalysis.AllowNull]
@@ -499,12 +474,15 @@ public sealed class AppState
     public string DeepCapsuleGapSize { get; set; } = DeepCapsuleGapSizes.Standard;
     public bool ShowTopBarNewTodoButton { get; set; } = true;
     public bool ShowTopBarNewNoteButton { get; set; } = true;
-    public bool ShowTopBarExternalOpenButton { get; set; } = true;
+    public bool ShowTopBarExternalOpenButton { get; set; }
     // One global ordered list. The first TopBarPinnedCount commands live in the bar;
     // the remaining commands live in the menu. The per-paper types have no separate layout.
     public List<string> TopBarShortcutOrder { get; set; } =
         PaperTopBarShortcuts.NormalizeOrder(null);
-    public int TopBarPinnedCount { get; set; } = 1;
+    public int TopBarPinnedCount { get; set; } = 2;
+    // Hiding an entry does not remove its saved position or disable its feature.
+    public List<string> HiddenTopBarShortcuts { get; set; } = [];
+    public string TopBarScript { get; set; } = string.Empty;
     // Read-only legacy migration inputs from older data.json versions. Do not write
     // obsolete per-type lists back once converted to the single global layout.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -525,6 +503,7 @@ public sealed class AppState
     public bool RunLinkedScriptCapsulesOnClick { get; set; }
     public int MaxTitleLength { get; set; } = PaperTitles.DefaultMaxTitleLength;
     public bool UseCapsuleCollapseAll { get; set; } = true;
+    public bool UseCapsuleFreeQueues { get; set; }
     public bool CompactMasterCapsule { get; set; }
     public Dictionary<string, bool> CapsuleCollapseAllActiveQueues { get; set; } = new();
     public bool ShowDeepCapsuleWhileExpanded { get; set; } = true;
@@ -573,14 +552,6 @@ public sealed class AppState
         ExperimentalWindowTetherOptions.Auto;
     public int ExperimentalWindowTetherGap { get; set; } =
         ExperimentalWindowTetherOptions.DefaultGap;
-    public bool ExperimentalTetherVisibilityLink { get; set; }
-    public string ExperimentalTetherMinimizedBehavior { get; set; } =
-        ExperimentalTetherVisibilityModes.Hide;
-    /// <summary>
-    /// Paper ResizeGrip: standard / soft (50% transparent) / hidden (no dots; all edges resize).
-    /// Dot color is Windows ControlDark with a light scheme tint.
-    /// </summary>
-    public string ResizeGripMode { get; set; } = ResizeGripModes.Soft;
     public string FullscreenTopmostMode { get; set; } = FullscreenTopmostModes.Avoid;
     public bool UsePersistentPowerShellProcess { get; set; }
     public bool PreferPowerShell7 { get; set; } = true;
@@ -652,6 +623,9 @@ public sealed class PaperData
     // assigned" — on load it inherits the legacy global anchor so existing capsules keep place.
     public string CapsuleSide { get; set; } = "";
     public string CapsuleMonitorDeviceName { get; set; } = "";
+
+    // An empty instance id preserves the original one-queue-per-edge data format.
+    public string CapsuleQueueId { get; set; } = "";
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? DeepCapsuleExpandedX { get; set; }

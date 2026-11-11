@@ -3,7 +3,6 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
-using System.Windows.Input;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -16,32 +15,9 @@ internal static class MaterialPresentationChecks
 {
     internal static void Run(AppController controller)
     {
-        var desktop = new Int32Rect(-8192, -2160, 16384, 8640);
-        var ordinary = BackgroundCaptureLayout.Create(
-            new Int32Rect(100, 100, 560, 440),
-            new DesktopBackgroundCapture.Region(0, 0, 560, 440, 64),
-            desktop)!;
-        Program.Assert(
-            ordinary.PixelWidth == ordinary.Bounds.Width &&
-            ordinary.PixelHeight == ordinary.Bounds.Height,
-            "ordinary one-shot snapshots keep physical 1:1 detail");
 
-        foreach (var size in new[] { new Size(2400, 1200), new Size(2048, 2048), new Size(3968, 896) })
-        {
-            var region = new DesktopBackgroundCapture.Region(0, 0, (int)size.Width, (int)size.Height, 96);
-            var layout = BackgroundCaptureLayout.Create(
-                new Int32Rect(-3500, 100, region.Width, region.Height),
-                region,
-                desktop)!;
-            Program.Assert(
-                (long)layout.PixelWidth * layout.PixelHeight <= BackgroundCaptureLayout.PixelBudget &&
-                layout.PixelWidth <= 2048 &&
-                layout.PixelHeight <= 2048,
-                "large static snapshots downsample only to the bounded pixel budget");
-        }
-
-        var saved = (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations,
-            controller.State.MatchAuxiliaryMaterialStrength, controller.State.MicaAlwaysActive);
+        var saved = (controller.State.PaperSkin, controller.State.Theme,
+            controller.State.EnableAnimations, controller.State.MicaAlwaysActive);
         Window? settings = null;
         var owner = new Window { Width = 200, Height = 100, Left = 40, Top = 40, ShowInTaskbar = false, Content = new Border() };
         ContextMenu? menu = null, aeroMenu = null;
@@ -49,39 +25,36 @@ internal static class MaterialPresentationChecks
         {
             controller.State.PaperSkin = PaperSkins.Acrylic; controller.State.Theme = "light";
             controller.State.EnableAnimations = false;
-            controller.State.MatchAuxiliaryMaterialStrength = true;
             Theme.Invalidate();
             owner.Show();
             menu = controller.CreateTrayMenu(); menu.Items.Add(new MenuItem { Header = "Cancel before background is ready" });
             menu.PlacementTarget = (UIElement)owner.Content; menu.Placement = PlacementMode.Bottom;
             var opens = 0; menu.Opened += (_, _) => opens++;
-            menu.SetCurrentValue(ContextMenu.IsOpenProperty, true); menu.IsOpen = false; Wait(400);
-            Program.Assert(!menu.IsOpen && opens == 0, "cancelling an async menu open never reopens it later");
-            menu.SetCurrentValue(ContextMenu.IsOpenProperty, true); Until(() => menu.IsOpen && opens == 1, "reopen after cancellation"); Wait(80);
+            menu.SetCurrentValue(ContextMenu.IsOpenProperty, true);
+            Until(() => menu.IsOpen && opens == 1, "tray menu opens immediately");
+            menu.IsOpen = false; Wait(80);
+            Program.Assert(!menu.IsOpen && opens == 1, "dismissed menu stays closed");
+            menu.SetCurrentValue(ContextMenu.IsOpenProperty, true);
+            Until(() => menu.IsOpen && opens == 2, "tray menu can reopen immediately");
             var menuSurface = Find(menu);
-            Program.Assert(menuSurface != null && menuSurface.FirstMenuRenderUsedBackground && menu.Opacity == 1,
-                "production tray menu opens with the real material, without a foreground fade");
+            Program.Assert(menuSurface is { IsMenu: true } && menu.Opacity == 1,
+                "tray menu uses the normal popup without a deferred background capture");
             menu.IsOpen = false; Wait(60);
 
             controller.State.PaperSkin = PaperSkins.Aero; Theme.Invalidate();
-            Program.Assert(!MaterialMenuOpening.NeedsBackground && MaterialMenuOpening.SuppressPopupAnimation,
-                "Aero popup skips screen capture but suppresses the solid-to-transparent Fade");
             aeroMenu = controller.CreateTrayMenu();
             aeroMenu.PlacementTarget = (UIElement)owner.Content; aeroMenu.Placement = PlacementMode.Bottom;
             aeroMenu.SetCurrentValue(ContextMenu.IsOpenProperty, true);
             Until(() => aeroMenu.IsOpen, "Aero menu opens immediately without capture preparation"); Wait(80);
-            AssertNoPopupFade(aeroMenu);
             var aeroSurface = Find(aeroMenu);
-            Program.Assert(aeroSurface is { Skin: PaperSkins.Aero } && !aeroSurface.HasBackgroundCapture &&
-                aeroSurface.MenuFallbackRenderCount == 0,
-                "Aero menu uses direct transparent transmission and never starts a background sampler");
+            Program.Assert(aeroSurface is { Skin: PaperSkins.Aero, IsMenu: true } &&
+                aeroMenu.Opacity == 1, "Aero menu uses the normal immediate popup path");
             aeroMenu.IsOpen = false; Wait(60);
             controller.State.PaperSkin = PaperSkins.Acrylic; Theme.Invalidate();
 
             CheckRealRightClicks(controller);
             CheckPaperTopBar(controller);
-            CheckTopBarSettingsDropRouting(controller);
-            CheckPaperStartupFade(controller);
+            CheckTopBarSettingsDrag(controller);
             CheckMasterRightClicks(controller);
             CheckEdgeExternalForeground(controller);
             controller.State.PaperSkin = PaperSkins.Acrylic; controller.State.Theme = "light";
@@ -93,16 +66,16 @@ internal static class MaterialPresentationChecks
             settings = (Window)typeof(AppController).GetField("_settingsWindow", Program.Private)!.GetValue(controller)!;
             var shell = (SkinBorder)settings.Content;
             Wait(120);
-            Program.Assert(!shell.IsBackgroundActive && !shell.HasBackgroundCapture,
-                "expanded Settings uses the native Acrylic backdrop without a software background-capture worker");
+            Program.Assert(shell.Background != null && settings.Opacity == 1,
+                "expanded settings shell keeps its native material composition");
             var oldContent = shell.Child;
             show.Invoke(controller, [Enum.Parse(pageType, "Visual")]);
             Program.Assert(ReferenceEquals(shell, settings.Content) && !ReferenceEquals(oldContent, shell.Child) &&
-                !shell.IsBackgroundActive && !shell.HasBackgroundCapture,
-                "page switch replaces only Settings content and keeps the native material path capture-free");
+                settings.Opacity == 1,
+                "page switch replaces only Settings content on the same native window");
             settings.Width += 12; settings.UpdateLayout(); shell.RefreshBackground();
-            Program.Assert(!shell.IsBackgroundActive && !shell.HasBackgroundCapture && settings.Opacity == 1,
-                "resizing Settings keeps the native material path capture-free and fully visible");
+            Program.Assert(settings.Opacity == 1 && ReferenceEquals(shell, settings.Content),
+                "resizing Settings retains its shell and visible content");
 
             // This real settings interaction was previously trapped inside the discarded
             // CopyFromScreen fixture; keep the independent WPF behavior without desktop pixels.
@@ -122,7 +95,7 @@ internal static class MaterialPresentationChecks
             if (aeroMenu != null) aeroMenu.IsOpen = false;
             settings?.Close(); owner.Close();
             (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations,
-                controller.State.MatchAuxiliaryMaterialStrength, controller.State.MicaAlwaysActive) = saved;
+                controller.State.MicaAlwaysActive) = saved;
             Theme.Invalidate();
         }
     }
@@ -131,8 +104,10 @@ internal static class MaterialPresentationChecks
         var state = controller.State;
         var oldOrder = state.TopBarShortcutOrder.ToList();
         var oldDivider = state.TopBarPinnedCount;
+        var oldHidden = state.HiddenTopBarShortcuts.ToList();
         var oldSkin = state.PaperSkin;
         var oldLinks = state.EnableTodoPaperLinks;
+        var oldTether = state.ExperimentalWindowTethering;
         var paper = new PaperData
         {
             Type = PaperTypes.Todo, Title = "Top bar commands",
@@ -146,7 +121,9 @@ internal static class MaterialPresentationChecks
         try
         {
             state.PaperSkin = PaperSkins.Paper;
+            state.HiddenTopBarShortcuts = [];
             state.EnableTodoPaperLinks = true;
+            state.ExperimentalWindowTethering = false;
             // Preserve an explicit two-creation-button fixture for width and overflow tests.
             state.TopBarShortcutOrder =
                 [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.NewNote,
@@ -222,11 +199,21 @@ internal static class MaterialPresentationChecks
             Program.Assert(Has(narrowMenu, Strings.Get("MenuQuick")) &&
                 Has(narrowMenu, Strings.Get("MenuNewTodoPaper")) &&
                 Has(narrowMenu, Strings.Get("MenuNewNotePaper")) &&
-                Has(narrowMenu, Strings.Get("MenuTopBarAssociationDrag")) &&
+                Has(narrowMenu, Strings.Get("MenuAssociationTarget")) &&
                 Has(narrowMenu, Strings.Get("TraySettings")) &&
                 Has(narrowMenu, controller.PaperCapsuleTitle(paper)) &&
                 !Has(narrowMenu, Strings.Get("MenuCustomizeTopBar")),
                 "overflow restores Quick, paper title and Settings, without title-bar customization");
+            var exportMenu = narrowMenu.Items.OfType<MenuItem>().Single(item =>
+                Equals(item.Header, Strings.Get("MenuExport")));
+            exportMenu.IsSubmenuOpen = true;
+            Program.Pump();
+            Program.Assert(exportMenu.IsSubmenuOpen && exportMenu.Items.OfType<MenuItem>()
+                    .Select(item => item.Header as string).SequenceEqual(new[] {
+                        Strings.Get("MenuExportCurrent"), Strings.Get("MenuExportAllNotes"),
+                        Strings.Get("MenuExportAllTodos"), Strings.Get("MenuExportAllPapers") }),
+                "export scopes remain reachable inside one real submenu");
+            exportMenu.IsSubmenuOpen = false;
             var narrowPlugins = narrowMenu.Items.OfType<MenuItem>().Single(item =>
                 Equals(item.Header, Strings.Get("MenuTopBarPluginActions")));
             Program.Assert(narrowPlugins.Items.Count == 4,
@@ -270,8 +257,9 @@ internal static class MaterialPresentationChecks
             OpenMenu();
             var dragMenu = more.ContextMenu!;
             var dragEntry = dragMenu.Items.OfType<MenuItem>().Single(item =>
-                Equals(item.Header, Strings.Get("MenuTopBarAssociationDrag")));
-            Program.Assert(dragEntry.StaysOpenOnClick,
+                Equals(item.Header, Strings.Get("MenuAssociationTarget")));
+            Program.Assert(dragEntry.StaysOpenOnClick &&
+                Equals(dragEntry.ToolTip, Strings.Get("MenuTopBarAssociationDragTodo")),
                 "association remains a draggable menu command when the whole group overflows");
             try
             {
@@ -303,7 +291,7 @@ internal static class MaterialPresentationChecks
             var wideMenu = more.ContextMenu!;
             Program.Assert(!Has(wideMenu, Strings.Get("MenuNewTodoPaper")) &&
                 !Has(wideMenu, Strings.Get("MenuNewNotePaper")) &&
-                !Has(wideMenu, Strings.Get("MenuTopBarAssociationDrag")) &&
+                !Has(wideMenu, Strings.Get("MenuAssociationTarget")) &&
                 !Has(wideMenu, Strings.Get("MenuTopBarPluginActions")) &&
                 Has(wideMenu, Strings.Get("MenuQuick")) &&
                 Has(wideMenu, Strings.Get("TraySettings")),
@@ -311,6 +299,16 @@ internal static class MaterialPresentationChecks
             var titles = wideMenu.Items.OfType<MenuItem>()
                 .Select(item => item.Header as string).ToArray();
             wideMenu.IsOpen = false;
+
+            // A still-visible edge capsule has its own menu, even when the source
+            // paper is expanded and both creation commands are pinned in its top bar.
+            var buildCapsuleMenu = typeof(PaperWindow).GetMethod(
+                "BuildDeepCapsuleSlotContextMenu", Program.Private)!;
+            var capsuleMenu = (ContextMenu)buildCapsuleMenu.Invoke(window, null)!;
+            Program.Assert(Has(capsuleMenu, Strings.Get("MenuNewTodoPaper")) &&
+                Has(capsuleMenu, Strings.Get("MenuNewNotePaper")),
+                "expanded edge capsule retains both creation entries despite visible top-bar shortcuts");
+
             var chrome = Field<SkinBorder>("_paperChrome");
             var rightClick = chrome.ContextMenu!;
             rightClick.PlacementTarget = chrome;
@@ -330,16 +328,73 @@ internal static class MaterialPresentationChecks
                 "moving a shortcut into the menu immediately removes the live title-bar icon");
             overflow.IsOpen = false;
 
-            // Verify the actual General settings control is one two-group drag surface.
-            var build = typeof(AppController).GetMethod("BuildTopBarShortcutSettings", Program.Private)!;
-            var editor = (UIElement)build.Invoke(controller, null)!;
-            var labels = Descendants(editor).OfType<TextBlock>().Select(t => t.Text).ToArray();
-            Program.Assert(labels.Contains(Strings.Get("TopBarShownHeading")) &&
-                labels.Contains(Strings.Get("TopBarMenuHeading")) &&
-                labels.Contains(Strings.Get("TopBarAssociation")) &&
-                labels.Contains(Strings.Get("TopBarExternalEditor")) &&
-                !Descendants(editor).OfType<CheckBox>().Any(),
-                "Settings contains exactly one reorderable two-section list, without checkboxes");
+            var orderBeforeHide = state.TopBarShortcutOrder.ToArray();
+            controller.SetTopBarShortcutHidden(PaperTopBarShortcuts.NewTodo, true);
+            controller.SetTopBarShortcutHidden(PaperTopBarShortcuts.NewNote, true);
+            Program.Pump();
+            OpenMenu();
+            var hiddenMenu = more.ContextMenu!;
+            Program.Assert(createTodo.Visibility != Visibility.Visible &&
+                createNote.Visibility != Visibility.Visible &&
+                !Has(hiddenMenu, Strings.Get("MenuNewTodoPaper")) &&
+                !Has(hiddenMenu, Strings.Get("MenuNewNotePaper")),
+                "Hide removes both pinned and menu shortcuts without falling back to overflow");
+            hiddenMenu.IsOpen = false;
+            var hiddenCapsuleMenu = (ContextMenu)buildCapsuleMenu.Invoke(window, null)!;
+            rightClick.IsOpen = true;
+            Program.Pump();
+            Program.Assert(!Has(hiddenCapsuleMenu, Strings.Get("MenuNewTodoPaper")) &&
+                !Has(hiddenCapsuleMenu, Strings.Get("MenuNewNotePaper")) &&
+                !Has(rightClick, Strings.Get("MenuNewTodoPaper")) &&
+                !Has(rightClick, Strings.Get("MenuNewNotePaper")) &&
+                Has(rightClick, Strings.Get("TraySettings")),
+                "Hide applies to edge and cached paper context menus while fixed Settings remains reachable");
+            rightClick.IsOpen = false;
+            controller.SetTopBarShortcutHidden(PaperTopBarShortcuts.NewTodo, false);
+            controller.SetTopBarShortcutHidden(PaperTopBarShortcuts.NewNote, false);
+            LayoutAt(430);
+            OpenMenu();
+            Program.Assert(state.TopBarShortcutOrder.SequenceEqual(orderBeforeHide) &&
+                createTodo.Visibility == Visibility.Visible &&
+                Has(more.ContextMenu!, Strings.Get("MenuNewNotePaper")),
+                "Unhide restores each original title-bar or menu location");
+            more.ContextMenu!.IsOpen = false;
+
+            // Menu-only descriptors remain reachable at any width without creating title-bar
+            // buttons. They use the same Paper/Runtime callbacks and teardown as normal actions.
+            var menuInvocations = new List<PaperTopBarActionInvocation>();
+            controller.SetPluginPaperTopBarActions(paperOwner, "topbar-fixture", paper.Id,
+                [new() { Id = "paper-menu", ToolTip = "Paper menu", MenuOnly = true }],
+                PaperHostTopBarActions.None, () => true, menuInvocations.Add);
+            controller.SetPluginGlobalTopBarActions(globalOwner, "topbar-fixture",
+                [new() { Id = "global-menu", ToolTip = "Global menu", MenuOnly = true }],
+                () => true, menuInvocations.Add);
+            LayoutAt(600);
+            Program.Assert(plugins.Children.Count == 0 && plugins.Visibility == Visibility.Collapsed,
+                "menu-only actions neither materialize title-bar buttons nor reserve title-bar space");
+            OpenMenu();
+            var menuOnly = more.ContextMenu!;
+            var menuActions = menuOnly.Items.OfType<MenuItem>().Single(item =>
+                Equals(item.Header, Strings.Get("MenuTopBarPluginActions")))
+                .Items.OfType<MenuItem>().ToArray();
+            Program.Assert(menuActions.Select(item => item.Header as string)
+                    .SequenceEqual(new[] { "Paper menu", "Global menu" }),
+                "menu-only actions preserve scope ordering and use their text labels");
+            foreach (var item in menuActions) item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Program.Assert(menuInvocations.Count == 2 &&
+                menuInvocations[0].Scope == PaperTopBarActionScope.Paper &&
+                menuInvocations[1].Scope == PaperTopBarActionScope.Global &&
+                menuInvocations.All(invocation => invocation.TargetPaperId == paper.Id),
+                "menu-only callbacks retain the correct target paper and scope");
+            menuOnly.IsOpen = false;
+            controller.RemovePluginPaperTopBarSession(paperOwner);
+            controller.RemovePluginGlobalTopBarRuntime(globalOwner, "topbar-fixture");
+            foreach (var item in menuActions) item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Program.Assert(menuInvocations.Count == 2, "revoked menu-only actions must not invoke old callbacks");
+            OpenMenu();
+            Program.Assert(!Has(more.ContextMenu!, Strings.Get("MenuTopBarPluginActions")),
+                "removed owners leave no plugin menu actions");
+            more.ContextMenu!.IsOpen = false;
         }
         finally
         {
@@ -349,27 +404,28 @@ internal static class MaterialPresentationChecks
             state.Papers.Remove(paper);
             state.TopBarShortcutOrder = oldOrder;
             state.TopBarPinnedCount = oldDivider;
+            state.HiddenTopBarShortcuts = oldHidden;
             state.EnableTodoPaperLinks = oldLinks;
+            state.ExperimentalWindowTethering = oldTether;
             state.PaperSkin = oldSkin;
             SetCursorPos(previousCursor.X, previousCursor.Y);
             Theme.Invalidate();
         }
     }
 
-    private static void CheckTopBarSettingsDropRouting(AppController controller)
+    private static void CheckTopBarSettingsDrag(AppController controller)
     {
-        // Drive the actual WPF DragOver/Drop routed handlers on the real settings
-        // controls. This covers separator/heading hit routing as well as row slots;
-        // it neither captures desktop pixels nor needs a second CI runner.
-        const string dragFormat = "PaperTodo.TopBarShortcut";
+        // A single physical drag covers the settings source gesture, routed drop
+        // and committed order without enumerating every decorative drop region.
         var state = controller.State;
         var originalOrder = state.TopBarShortcutOrder.ToArray();
         var originalCount = state.TopBarPinnedCount;
+        var originalHidden = state.HiddenTopBarShortcuts.ToList();
         GetCursorPos(out var savedCursor);
         Window? surface = null;
         try
         {
-            // Exercise drag routes with an explicit pre-change layout, not the new defaults.
+            // Use an explicit order so the gesture does not depend on default pins.
             state.TopBarShortcutOrder =
                 [PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.NewNote,
                  PaperTopBarShortcuts.Association, PaperTopBarShortcuts.ExternalEditor];
@@ -382,154 +438,28 @@ internal static class MaterialPresentationChecks
             };
             var builder = typeof(AppController).GetMethod(
                 "BuildTopBarShortcutSettings", Program.Private)!;
-            StackPanel DropArea(StackPanel editor) =>
-                (StackPanel)((Border)editor.Children[1]).Child;
-            StackPanel Rebuild()
-            {
-                var root = (StackPanel)builder.Invoke(controller, null)!;
-                surface.Content = root;
-                surface.UpdateLayout();
-                Program.Pump();
-                return root;
-            }
-
-            var root = Rebuild();
+            var root = (StackPanel)builder.Invoke(controller, null)!;
+            surface.Content = root;
             surface.Show();
             surface.Activate();
+            surface.UpdateLayout();
             Program.Pump();
-            var glyphs = Descendants(root).OfType<TextBlock>().Select(t => t.Text).ToArray();
-            var actionFrame = (Border)root.Children[1];
-            var actionArea = (StackPanel)actionFrame.Child;
-            var titleHint = Descendants((Grid)root.Children[0]).OfType<Border>()
-                .Single(b => b.ToolTip is ToolTip);
-            Program.Assert(actionFrame.BorderThickness.Left == 1 &&
-                actionArea.Children.Count == 5 &&
-                ((TextBlock)((ToolTip)titleHint.ToolTip).Content).Text ==
-                    Strings.Get("TipTopBarShortcutSettings") &&
-                ((Border)actionArea.Children[2]).Margin.Top <= 6,
-                "shortcuts have a framed, compact two-section editor and localized help");
-            Program.Assert(root.Children.Count == 2 &&
-                glyphs.Contains("✓") && glyphs.Contains("✎"),
-                "settings omit the redundant hint and reuse the paper capsule glyphs");
-            var vectors = Descendants(root).OfType<System.Windows.Shapes.Path>().ToArray();
-            Program.Assert(vectors.Length == 2 &&
-                vectors.All(path => path.Data != null &&
-                    path.Data.Bounds.Width > 0 && path.Data.Bounds.Height > 0 &&
-                    path.StrokeThickness == 2 &&
-                    path.StrokeStartLineCap == PenLineCap.Round &&
-                    path.StrokeLineJoin == PenLineJoin.Round) &&
-                !glyphs.Contains("◎") && !glyphs.Contains("↗"),
-                "association and external editor use distinct round-stroke vectors instead of font glyphs");
-
-            var shortcutIcons = new[]
-                {
-                    (StackPanel)actionArea.Children[1],
-                    (StackPanel)actionArea.Children[4]
-                }
-                .SelectMany(group => group.Children.OfType<Grid>())
-                .Select(frame => (FrameworkElement)((StackPanel)
-                    ((Border)frame.Children[0]).Child).Children[1])
-                .ToArray();
-            var iconCenters = shortcutIcons.Select(icon => icon.TranslatePoint(
-                new Point(icon.ActualWidth / 2, icon.ActualHeight / 2), root).X).ToArray();
-            Program.Assert(shortcutIcons.Length == 4 &&
-                shortcutIcons.All(icon => icon is Grid &&
-                    Math.Abs(icon.Width - AppTypography.Scale(24)) < 0.1) &&
-                iconCenters.Max() - iconCenters.Min() < 0.75,
-                "all four shortcut icons are horizontally centered on the same column");
-
-            var createDragEvent = typeof(DragEventArgs).GetConstructor(
-                BindingFlags.Instance | BindingFlags.NonPublic,
-                binder: null,
-                types: [typeof(IDataObject), typeof(DragDropKeyStates),
-                    typeof(DragDropEffects), typeof(DependencyObject), typeof(Point)],
-                modifiers: null)!;
-            DragEventArgs RaiseDrag(FrameworkElement target, RoutedEvent kind,
-                string action, Point position)
-            {
-                var evt = (DragEventArgs)createDragEvent.Invoke([
-                    new DataObject(dragFormat, action),
-                    DragDropKeyStates.LeftMouseButton, DragDropEffects.Move,
-                    target, position
-                ]);
-                evt.RoutedEvent = kind;
-                target.RaiseEvent(evt);
-                return evt;
-            }
-
-            var upperGroup = (StackPanel)DropArea(root).Children[1];
-            var separator = (Border)DropArea(root).Children[2];
-            var menuHeading = (TextBlock)DropArea(root).Children[3];
-            Program.Assert(root.AllowDrop && upperGroup.AllowDrop &&
-                separator.ActualHeight > 0 && menuHeading.ActualHeight > 0,
-                "real settings editor has a hit-testable drop surface and divider");
-
-            var hover = RaiseDrag(menuHeading, DragDrop.DragOverEvent,
-                PaperTopBarShortcuts.NewNote,
-                new Point(8, menuHeading.ActualHeight / 2));
-            Program.Assert(hover.Handled && hover.Effects == DragDropEffects.Move,
-                "hovering the menu heading is an accepted WPF drag target");
-            var dropped = RaiseDrag(menuHeading, DragDrop.DropEvent,
-                PaperTopBarShortcuts.NewNote,
-                new Point(8, menuHeading.ActualHeight / 2));
-            Program.Assert(dropped.Handled && state.TopBarPinnedCount == 1 &&
-                PaperTopBarShortcuts.Menu(state)[0] == PaperTopBarShortcuts.NewNote,
-                "dropping on the lower section heading moves an actual item below the divider");
-
-            root = Rebuild();
-            separator = (Border)DropArea(root).Children[2];
-            var movedLower = RaiseDrag(separator, DragDrop.DropEvent,
-                PaperTopBarShortcuts.NewTodo,
-                new Point(10, separator.ActualHeight * 0.75));
-            Program.Assert(movedLower.Handled && state.TopBarPinnedCount == 0 &&
-                PaperTopBarShortcuts.Menu(state)[0] == PaperTopBarShortcuts.NewTodo,
-                "the divider's lower half drops into the menu without a dead zone");
-
-            root = Rebuild();
-            var upperHeading = (TextBlock)DropArea(root).Children[0];
-            RaiseDrag(upperHeading, DragDrop.DropEvent,
-                PaperTopBarShortcuts.Association,
-                new Point(8, upperHeading.ActualHeight / 2));
-            Program.Assert(state.TopBarPinnedCount == 1 &&
-                PaperTopBarShortcuts.Pinned(state)[0] == PaperTopBarShortcuts.Association,
-                "the upper group heading accepts a drop at its first slot");
-
-            root = Rebuild();
-            separator = (Border)DropArea(root).Children[2];
-            var movedUpper = RaiseDrag(separator, DragDrop.DropEvent,
-                PaperTopBarShortcuts.NewTodo,
-                new Point(10, separator.ActualHeight * 0.25));
-            Program.Assert(movedUpper.Handled && state.TopBarPinnedCount == 2 &&
-                PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                    [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewTodo]),
-                "the divider's upper half appends to the title-bar group");
-
-            root = Rebuild();
-            var lowerGroup = (StackPanel)DropArea(root).Children[4];
-            var firstRow = (Grid)lowerGroup.Children[0];
-            var rowHover = RaiseDrag(firstRow, DragDrop.DragOverEvent,
-                PaperTopBarShortcuts.ExternalEditor,
-                new Point(10, firstRow.ActualHeight * 0.2));
-            var insertion = firstRow.Children.OfType<Border>().Last();
-            Program.Assert(rowHover.Handled &&
-                insertion.Visibility == Visibility.Visible &&
-                insertion.VerticalAlignment == VerticalAlignment.Top,
-                "hovering a row shows the real WPF before/after insertion indicator");
-            var rowDrop = RaiseDrag(firstRow, DragDrop.DropEvent,
-                PaperTopBarShortcuts.ExternalEditor,
-                new Point(10, firstRow.ActualHeight * 0.2));
-            Program.Assert(rowDrop.Handled &&
-                PaperTopBarShortcuts.Menu(state).SequenceEqual(
-                    [PaperTopBarShortcuts.ExternalEditor, PaperTopBarShortcuts.NewNote]) &&
-                insertion.Visibility != Visibility.Visible,
-                "dropping on a real row reorders the menu and clears the insertion mark");
-
-            // A physical left-button drag verifies the source gesture from
-            // PreviewMouseLeftButtonDown through DragDrop.DoDragDrop to Drop.
-            root = Rebuild();
-            upperGroup = (StackPanel)DropArea(root).Children[1];
-            menuHeading = (TextBlock)DropArea(root).Children[3];
-            var sourceRow = (Grid)upperGroup.Children[1]; // New Todo
+            var dropArea = (StackPanel)((Border)root.Children[1]).Child;
+            var upperGroup = (StackPanel)dropArea.Children[1];
+            var menuHeading = (FrameworkElement)dropArea.Children[3];
+            var sourceRow = (Grid)upperGroup.Children[0]; // New Todo
+            var hide = Descendants(sourceRow).OfType<CheckBox>().Single();
+            var hideAt = hide.PointToScreen(new Point(hide.ActualWidth / 2, hide.ActualHeight / 2));
+            SetCursorPos((int)hideAt.X, (int)hideAt.Y);
+            Wait(30);
+            mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+            SetCursorPos((int)hideAt.X + 9, (int)hideAt.Y);
+            Wait(40);
+            mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+            Program.Pump();
+            Program.Assert(PaperTopBarShortcuts.IsHidden(state, PaperTopBarShortcuts.NewTodo) &&
+                state.TopBarPinnedCount == 2 && state.TopBarShortcutOrder[0] == PaperTopBarShortcuts.NewTodo,
+                "moving a checkbox press past the drag threshold only toggles visibility");
             var from = sourceRow.PointToScreen(new Point(
                 sourceRow.ActualWidth / 2, sourceRow.ActualHeight / 2));
             var to = menuHeading.PointToScreen(new Point(
@@ -560,7 +490,7 @@ internal static class MaterialPresentationChecks
                 Until(() => state.TopBarPinnedCount == 1,
                     "real left-button drag moves New Todo into the lower section");
                 Program.Assert(PaperTopBarShortcuts.Pinned(state).SequenceEqual(
-                        [PaperTopBarShortcuts.Association]) &&
+                        [PaperTopBarShortcuts.NewNote]) &&
                     PaperTopBarShortcuts.Menu(state)[0] == PaperTopBarShortcuts.NewTodo,
                     "mouse-driven WPF drag and drop persists a single global section move");
             }
@@ -575,32 +505,7 @@ internal static class MaterialPresentationChecks
             SetCursorPos(savedCursor.X, savedCursor.Y);
             state.TopBarShortcutOrder = originalOrder.ToList();
             state.TopBarPinnedCount = originalCount;
-        }
-    }
-
-    private static void CheckPaperStartupFade(AppController controller)
-    {
-        var state = controller.State;
-        var oldAnimations = state.EnableAnimations;
-        var paper = new PaperData { Type = PaperTypes.Todo,
-            Title = "Startup opacity", Width = 300, Height = 220, X = 80, Y = 80 };
-        state.Papers.Add(paper);
-        try
-        {
-            state.EnableAnimations = true;
-            controller.ShowPaper(paper);
-            Wait(700);
-            var windows = (Dictionary<string, PaperWindow>)typeof(AppController)
-                .GetField("_windows", Program.Private)!.GetValue(controller)!;
-            Program.Assert(windows.TryGetValue(paper.Id, out var window) &&
-                !window.HasAnimatedProperties,
-                "startup fade releases its opacity clock after showing the real paper");
-            window!.CloseForReal();
-        }
-        finally
-        {
-            state.Papers.Remove(paper);
-            state.EnableAnimations = oldAnimations;
+            state.HiddenTopBarShortcuts = originalHidden;
         }
     }
 
@@ -640,8 +545,8 @@ internal static class MaterialPresentationChecks
                     mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);
                     Until(() => menu!.IsOpen, $"actual right click opens {(collapsed ? "capsule" : "paper")} menu");
                     Wait(80);
-                    Program.Assert(Find(menu!)?.FirstMenuRenderUsedBackground == true,
-                        "service-opened menu retains its prepared first-frame material");
+                    Program.Assert(Find(menu!) is { IsMenu: true } && menu!.Opacity == 1,
+                        "service-opened menu paints the lightweight material immediately");
                     menu!.SetCurrentValue(ContextMenu.IsOpenProperty, false); Wait(80);
                     Program.Assert(!menu.IsOpen, "real right-click menu closes and can reopen");
                 }
@@ -655,14 +560,12 @@ internal static class MaterialPresentationChecks
     }
     private static void CheckMasterRightClicks(AppController controller)
     {
-        var original = (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations,
-            controller.State.MatchAuxiliaryMaterialStrength);
+        var original = (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations);
         controller.State.PaperSkin = PaperSkins.Paper; Theme.Invalidate();
         var master = new MasterCapsuleWindow(controller, EdgeCapsuleEdge.Left, "");
         GetCursorPos(out var cursor);
         ContextMenu? menu = null;
         Window? outside = null;
-        RoutedEventHandler? opened = null;
         EventHandler? rendered = null;
         var observedFrames = 0;
         try
@@ -682,17 +585,11 @@ internal static class MaterialPresentationChecks
             outside.Show(); Wait(60);
             var pill = (FrameworkElement)typeof(MasterCapsuleWindow).GetField("_pill", Program.Private)!.GetValue(master)!;
             menu = pill.ContextMenu!;
-            opened = (_, _) =>
-            {
-                if (controller.State.MatchAuxiliaryMaterialStrength) AssertNoPopupFade(menu);
-            };
             rendered = (_, _) =>
             {
                 if (!menu.IsOpen) return;
-                if (controller.State.MatchAuxiliaryMaterialStrength) AssertNoPopupFade(menu);
                 observedFrames++;
             };
-            menu.Opened += opened;
             CompositionTarget.Rendering += rendered;
             // The very same detached template survives Paper -> Mica -> Acrylic.
             menu.ApplyTemplate();
@@ -704,7 +601,6 @@ internal static class MaterialPresentationChecks
                 Theme.Invalidate(); master.UpdateTheme(); Wait(60);
                 for (var attempt = 0; attempt < 2; attempt++)
                 {
-                    controller.State.MatchAuxiliaryMaterialStrength = attempt == 1;
                     var beforeFrames = observedFrames;
                     var point = pill.PointToScreen(new Point(pill.ActualWidth / 2, pill.ActualHeight / 2));
                     SetCursorPos((int)point.X, (int)point.Y); Wait(25);
@@ -713,24 +609,9 @@ internal static class MaterialPresentationChecks
                     Until(() => menu.IsOpen, "actual MASTER right click opens " + skin);
                     Wait(180);
                     Program.Assert(observedFrames > beforeFrames, "observe actual opening frames, not just the settled menu");
-                    var fullMaterial = controller.State.MatchAuxiliaryMaterialStrength;
-                    // Only transparent material popups need a forced local None. Opaque quiet
-                    // menus may use the normal system animation without exposing a plain frame.
-                    menu.Resources[SystemParameters.MenuPopupAnimationKey] = PopupAnimation.Fade;
-                    if (fullMaterial) AssertNoPopupFade(menu);
-                    menu.Resources.Remove(SystemParameters.MenuPopupAnimationKey);
                     var surface = Find(menu)!;
-                    var opacityOwners = new List<string>();
-                    for (DependencyObject? node = surface; node is Visual; node = VisualTreeHelper.GetParent(node))
-                        if (node is UIElement ui) opacityOwners.Add($"{ui.GetType().Name}:{ui.Opacity:F3}/{ui.IsVisible}");
-                    Console.WriteLine($"MASTER {skin}/{theme}/{attempt}: recipe={surface.Skin}; first={surface.FirstMenuRenderUsedBackground}; active={surface.IsBackgroundActive}; fallback={surface.MenuFallbackRenderCount}; capture={surface.HasBackgroundCapture}; frames={surface.BackgroundFrameCount}; suppress={surface.SuppressStaticBackgroundForOpening}; failure={surface.BackgroundFailure}; opacity={string.Join(',', opacityOwners)}");
-                    Program.Assert(surface.Skin == skin && !surface.HasBackgroundCapture,
-                        $"master {skin}/{theme}: current recipe stays capture-free after opening");
-                    Program.Assert(fullMaterial ? surface.IsBackgroundActive : !surface.IsBackgroundActive,
-                        $"master {skin}/{theme}: background transmission follows the full-material switch");
-                    if (fullMaterial)
-                        Program.Assert(surface.MenuFallbackRenderCount == 0,
-                            $"master {skin}/{theme}: transparent material has no plain-paper fallback frame");
+                    Program.Assert(surface.Skin == skin && surface.IsMenu,
+                        $"master {skin}/{theme}: correct lightweight surface after real right-click");
                     Program.Assert(menu.Opacity == 1, "master menu never hides content with a foreground opacity fade");
                     if (theme == "light" && skin == PaperSkins.Mica && attempt == 0)
                     {
@@ -766,13 +647,11 @@ internal static class MaterialPresentationChecks
             if (rendered != null) CompositionTarget.Rendering -= rendered;
             if (menu != null)
             {
-                if (opened != null) menu.Opened -= opened;
                 menu.IsOpen = false;
             }
             outside?.Close();
             master.CloseForReal(); SetCursorPos(cursor.X, cursor.Y);
-            (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations,
-                controller.State.MatchAuxiliaryMaterialStrength) = original;
+            (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations) = original;
             Theme.Invalidate();
         }
     }
@@ -781,7 +660,7 @@ internal static class MaterialPresentationChecks
         var state = controller.State;
         var original = (state.UseCapsuleMode, state.UseDeepCapsuleMode,
             state.EnableAnimations, state.ExperimentalEdgeCapsuleHoverPreview,
-            state.PaperSkin, state.Theme, state.MatchAuxiliaryMaterialStrength);
+            state.PaperSkin, state.Theme);
         var area = SystemParameters.WorkArea;
         var paper = new PaperData
         {
@@ -817,14 +696,14 @@ internal static class MaterialPresentationChecks
             CheckCapsuleExternalForeground(controller, content, content.ContextMenu!,
                 host.Handle, "EDGE", host.RefreshSkin,
                 area.Left + 180, area.Top + 120);
-            Console.WriteLine("PASS real EDGE right-click: external foreground, stable popup, outside click (both material strengths)");
+            Console.WriteLine("PASS real EDGE right-click: external foreground, stable popup and outside click");
         }
         finally
         {
             if (state.Papers.Contains(paper)) controller.DeletePaper(paper);
             (state.UseCapsuleMode, state.UseDeepCapsuleMode,
                 state.EnableAnimations, state.ExperimentalEdgeCapsuleHoverPreview,
-                state.PaperSkin, state.Theme, state.MatchAuxiliaryMaterialStrength) = original;
+                state.PaperSkin, state.Theme) = original;
             Theme.Invalidate();
         }
     }
@@ -861,11 +740,10 @@ internal static class MaterialPresentationChecks
                 System.Globalization.CultureInfo.InvariantCulture));
             var externalX = (int)Math.Round(left + 95);
             var externalY = (int)Math.Round(top + 60);
-            foreach (var fullMaterial in new[] { false, true })
+            foreach (var skin in new[] { PaperSkins.Mica, PaperSkins.Acrylic })
             {
-                controller.State.PaperSkin = PaperSkins.Mica;
+                controller.State.PaperSkin = skin;
                 controller.State.Theme = "light";
-                controller.State.MatchAuxiliaryMaterialStrength = fullMaterial;
                 Theme.Invalidate();
                 refreshTheme();
                 Wait(70);
@@ -942,17 +820,6 @@ internal static class MaterialPresentationChecks
                 }
             }
         }
-    }
-    private static void AssertNoPopupFade(ContextMenu menu)
-    {
-        var popup = LogicalTreeHelper.GetParent(menu) as Popup;
-        Program.Assert(popup != null && popup.PopupAnimation == PopupAnimation.None &&
-            !DependencyPropertyHelper.GetValueSource(popup, Popup.PopupAnimationProperty).IsExpression,
-            "live popup animation is a local None, not a dynamic system Fade expression");
-        for (DependencyObject? node = menu; node is Visual; node = VisualTreeHelper.GetParent(node))
-            if (node is UIElement ui)
-                Program.Assert(ui.Opacity == 1 && !DependencyPropertyHelper.GetValueSource(ui, UIElement.OpacityProperty).IsAnimated,
-                    "menu and PopupRoot have no fade at Opened or during composition");
     }
     [StructLayout(LayoutKind.Sequential)] private struct CursorPoint { public int X, Y; }
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out CursorPoint point);

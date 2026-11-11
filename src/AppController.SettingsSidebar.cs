@@ -11,17 +11,20 @@ namespace PaperTodo;
 
 public sealed partial class AppController
 {
+    private const double SettingsSidebarBaseWidth = 158;
     private readonly Dictionary<SettingsPage, double> _settingsPageScrollOffsets = new();
     private string? _settingsNativePalette;
 
     private void RefreshSettingsWindowContent()
     {
-        RefreshPluginPopupThemeForSettingsRefresh();
-
         if (_settingsWindow is not { } window)
         {
             return;
         }
+
+        // Rebuilding or navigating away from the workspace page discards its inline
+        // rename draft, without silently saving it.
+        CancelWorkspaceRenameOnPointer(null);
 
         // Focus loss after detaching the old tree is deferred. Commit the active editor
         // before its replacement reads State, so a theme/display refresh keeps the draft.
@@ -56,12 +59,6 @@ public sealed partial class AppController
         _settingsExternalMarkdownTextBox = null;
         _settingsHidePapersFromTaskbarCheckBox = null;
         _settingsHidePapersFromWindowSwitcherCheckBox = null;
-        _settingsCapsuleModeCheckBox = null;
-        _settingsDeepCapsuleModeCheckBox = null;
-        _settingsDeepCapsuleExpandedSlotCheckBox = null;
-        _settingsRememberDeepCapsuleExpandedPositionCheckBox = null;
-        _settingsCollapseExpandedDeepCapsuleOnClickCheckBox = null;
-        _settingsCapsuleCollapseAllCheckBox = null;
 
         window.Title = Strings.Get("TraySettings");
         window.SizeToContent = SizeToContent.Manual;
@@ -83,7 +80,8 @@ public sealed partial class AppController
             return;
         }
         if (id is "capsule.enabled" or "capsule.edge_enabled" or "capsule.master_enabled" or
-            "capsule.show_while_expanded" or "capsule.remember_expanded_position" or "capsule.click_to_collapse")
+            "capsule.free_queues" or "capsule.show_while_expanded" or
+            "capsule.remember_expanded_position" or "capsule.click_to_collapse")
         {
             RefreshSettingsCapsuleToggleStates();
             return;
@@ -92,19 +90,21 @@ public sealed partial class AppController
         {
             RefreshSettingsCapsuleToggleStates();
             RefreshSettingsRegions("general.todos");
+            if (id == "todo.paper_links") RefreshSettingsRegions("general.topbar");
             return;
         }
         if (id == "note.external_extension") return; // The live editor is synchronized by its effect.
         var region = id switch
         {
-            "appearance.animations" or "appearance.fast_animations" or
-                "window.fullscreen_mode" => "general.options",
+            "general.data_merge_conflicts" => "workspace.data",
+            "general.tooltips" => "visual.options",
+            "window.fullscreen_mode" => "general.options",
             "title.max_length" or "capsule.title_measure_limit" or "capsule.hide_close_button" or
                 "capsule.master_compact" => "general.capsuleAppearance",
-            "capsule.gap" or "window.resize_grip" or "note.image_reference_text" => "visual.options",
-            "edge.non_topmost" => "general.edgeTopmost",
+            "capsule.gap" => "visual.options",
+            "edge.non_topmost" => "general.capsules",
             "scripts.run_linked_on_click" => "general.todos",
-            "note.markdown_mode" or "note.edit_animations" => "note.markdown",
+            "note.markdown_mode" or "note.edit_animations" or "note.image_reference_text" => "note.markdown",
             "note.compress_large_images" => "note.images",
             _ when id.StartsWith("todo.reminder", StringComparison.Ordinal) => "labs.reminders",
             _ => id.Split('.')[0] switch
@@ -120,11 +120,12 @@ public sealed partial class AppController
                 "window" => "labs.window",
                 "scripts" => "note.scripts",
                 "shortcuts" => "shortcuts.bindings",
-                "mcp" => "labs.mcp",
+                "mcp" => "workspace.mcp",
                 _ => ""
             }
         };
         RefreshSettingsRegions(region);
+        if (id == "window.tether_enabled") RefreshSettingsRegions("general.topbar");
         if (region == "shortcuts.bindings") RefreshSettingsRegions("labs.passive");
     }
 
@@ -143,7 +144,7 @@ public sealed partial class AppController
         frame.RefreshSkin();
 
         var root = new Grid();
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(158) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(SettingsSidebarNavigationWidth()) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -319,7 +320,10 @@ public sealed partial class AppController
             ToggleAdvancedSettingsMode);
         advancedModeToggle.FontSize = AppTypography.Scale(11.5);
         advancedModeToggle.Margin = new Thickness(2, 2, 0, 0);
+        advancedModeToggle.IsEnabled = !FollowsMainWorkspaceSettings;
         advancedModeToggle.ToolTip = BuildSettingsHintTooltip(Strings.Get("TipAdvancedSettingsMode"));
+        ToolTipService.SetShowOnDisabled(advancedModeToggle, true);
+        ToolTipPreferences.SetAlwaysEnabled(advancedModeToggle, true);
         footer.Children.Add(advancedModeToggle);
 
         footer.Children.Add(BuildSettingsSignature());
@@ -332,6 +336,15 @@ public sealed partial class AppController
         };
         foreach (var page in SettingsPages())
         {
+            if (page == SettingsPage.Workspaces)
+                navigationItems.Children.Add(new Border
+                {
+                    Height = 1,
+                    Margin = new Thickness(12, 8, 12, 8),
+                    Background = TrayBorderBrush,
+                    Opacity = 0.3,
+                    SnapsToDevicePixels = true
+                });
             navigationItems.Children.Add(BuildSettingsSidebarNavigationItem(page));
         }
         root.Children.Add(new ScrollViewer
@@ -348,15 +361,39 @@ public sealed partial class AppController
     private IEnumerable<SettingsPage> SettingsPages()
     {
         yield return SettingsPage.General;
-        yield return SettingsPage.Todo;
-        yield return SettingsPage.Note;
+        yield return SettingsPage.NotesAndTodos;
         yield return SettingsPage.Visual;
         yield return SettingsPage.Shortcuts;
+        yield return SettingsPage.Workspaces;
         yield return SettingsPage.Plugins;
         if (State.AdvancedSettingsMode)
         {
             yield return SettingsPage.Labs;
         }
+    }
+
+    private double SettingsSidebarNavigationWidth()
+    {
+        double MeasureLabel(string text, double fontSize, double padding)
+        {
+            var label = new TextBlock
+            {
+                Text = text,
+                FontFamily = AppTypography.UiFontFamily,
+                FontSize = AppTypography.Scale(fontSize),
+                FontWeight = FontWeights.SemiBold,
+                Language = AppTypography.Language
+            };
+            AppTypography.ApplyTextRendering(label);
+            label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            return label.DesiredSize.Width + padding;
+        }
+
+        // Measure selected-weight labels too, so navigating cannot move the divider.
+        var width = MeasureLabel(Strings.Get("SettingsAdvancedMode"), 11.5, 50);
+        foreach (var page in SettingsPages())
+            width = Math.Max(width, MeasureLabel(SettingsPageLabel(page), 12.5, 42));
+        return Math.Clamp(Math.Ceiling(width), SettingsSidebarBaseWidth, SettingsSidebarBaseWidth * 1.2);
     }
 
     private UIElement BuildSettingsSidebarNavigationItem(SettingsPage page)
@@ -444,7 +481,7 @@ public sealed partial class AppController
             Width = SettingsContentWidth() + 18,
             Padding = new Thickness(8, 0, 8, 0),
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = BuildSettingsPage()
+            Child = WithWorkspaceSettingsInheritance(BuildSettingsPage())
         };
 
         var scrollViewer = new ScrollViewer
@@ -471,8 +508,8 @@ public sealed partial class AppController
     private UIElement BuildSettingsPage() => _settingsPage switch
     {
         SettingsPage.General => BuildSettingsSidebarGeneralPage(),
-        SettingsPage.Todo => BuildSettingsSidebarTodoPage(),
-        SettingsPage.Note => BuildSettingsSidebarNotePage(),
+        SettingsPage.Workspaces => BuildWorkspaceSettingsPage(),
+        SettingsPage.NotesAndTodos => BuildSettingsSidebarNotesAndTodosPage(),
         SettingsPage.Visual => BuildSettingsLiveRegion("visual.options", BuildVisualSettingsPage),
         SettingsPage.Shortcuts => BuildSettingsLiveRegion("shortcuts.bindings", BuildShortcutSettingsPage),
         SettingsPage.Plugins => BuildPluginsSettingsPage(),
@@ -484,8 +521,8 @@ public sealed partial class AppController
     {
         SettingsPage.General => SettingsSidebarLocalized(
             "常规", "General", "一般", "일반"),
-        SettingsPage.Todo => Strings.Get("MenuTodo"),
-        SettingsPage.Note => Strings.Get("PaperKindNote"),
+        SettingsPage.Workspaces => Strings.Get("WorkspaceDataSettingsTitle"),
+        SettingsPage.NotesAndTodos => Strings.Get("SettingsNotesAndTodos"),
         SettingsPage.Visual => Strings.Get("SettingsVisual"),
         SettingsPage.Shortcuts => Strings.Get("SettingsShortcuts"),
         SettingsPage.Plugins => Strings.Get("SettingsPlugins"),
@@ -511,7 +548,8 @@ public sealed partial class AppController
     private void ApplySettingsSidebarFrame(Window window)
     {
         var workArea = WindowWorkAreaHelper.WorkAreaFor(window);
-        var (targetWidth, targetHeight) = SettingsSidebarSizeForWorkArea(workArea);
+        var (targetWidth, targetHeight) = SettingsSidebarSizeForWorkArea(
+            workArea, SettingsSidebarNavigationWidth());
 
         var wasVisible = window.IsVisible;
         var oldLeft = window.Left;
@@ -539,17 +577,11 @@ public sealed partial class AppController
     }
 
 
-    // Keep this helper separate from the page builder so conflict-resolution fixes stay localized.
-    // Theme/font changes eventually rebuild the settings surface; notify open plugin popups even
-    // when the settings window itself is closed (for example, a system theme change).
-    private void RefreshPluginPopupThemeForSettingsRefresh()
+    private static (double Width, double Height) SettingsSidebarSizeForWorkArea(
+        Rect workArea, double navigationWidth)
     {
-        PluginPopupThemeChanged?.Invoke();
-    }
-
-    private static (double Width, double Height) SettingsSidebarSizeForWorkArea(Rect workArea)
-    {
-        var targetWidth = Math.Min(840, Math.Max(360, workArea.Width - 48));
+        var targetWidth = Math.Min(840 + navigationWidth - SettingsSidebarBaseWidth,
+            Math.Max(360, workArea.Width - 48));
         var targetHeight = Math.Min(620, Math.Max(320, workArea.Height - 48));
 
         // Preserve the normal minimum size when possible, but never let that minimum push the

@@ -22,6 +22,7 @@ public sealed partial class PaperWindow
             $"drag.input phase=pointer-down " +
             $"paper={EdgeCapsulePerformanceDiagnostics.ShortId(_paper.Id)} " +
             $"pointer={screenPosition.X:F0},{screenPosition.Y:F0}");
+        LatchNativeQueueControl();
         BeginEdgeCapsulePointerInteraction(screenPosition);
         QueueDeepCapsuleFloatingDragInfrastructurePrewarm();
     }
@@ -88,10 +89,11 @@ public sealed partial class PaperWindow
         return false;
     }
 
-    private bool OnEdgeCapsulePointerReleased(DeviceScreenPoint _)
+    private bool OnEdgeCapsulePointerReleased(DeviceScreenPoint releasePosition)
     {
         if (IsDeepCapsuleReordering)
         {
+            RefreshNativeQueueReleasePosition(releasePosition);
             EndDeepCapsuleReorderDrag(commit: true);
             ClearCapsuleInteractionKeyboardFocus();
             return true;
@@ -101,6 +103,12 @@ public sealed partial class PaperWindow
             return false;
         }
 
+        if (_nativeQueueClickRevoked)
+        {
+            _nativeQueueClickRevoked = false;
+            FinishEdgeCapsulePointerInteraction();
+            return true;
+        }
         FinishEdgeCapsulePointerInteraction();
         try
         {
@@ -274,8 +282,12 @@ public sealed partial class PaperWindow
     {
         CloseDeepCapsuleFloatingDragHost();
 
-        var host = EdgeCapsuleDragWindow.Rent(
-            CreateDeepCapsuleFloatingDragHostOptions(shape));
+        var options = CreateDeepCapsuleFloatingDragHostOptions(shape);
+        var carriedCount = _controller.NativeEdgeQueueCarriedCount(_paper.Id);
+        if ((carriedCount > 1 || _controller.NativeEdgeQueueCarriesMaster(_paper.Id)) &&
+            TryCreateMasterQueueFloatingDragHostOptions("\u25BE",
+                carriedCount.ToString(UiLanguages.EffectiveCulture), out var queueOptions)) options = queueOptions;
+        var host = EdgeCapsuleDragWindow.Rent(options);
         host.UnexpectedlyClosed += OnDeepCapsuleFloatingDragHostUnexpectedlyClosed;
         host.LocationChanged += OnDeepCapsuleFloatingDragHostLocationChanged;
 
@@ -283,17 +295,14 @@ public sealed partial class PaperWindow
         _deepCapsuleFloatingFullscreenAvoidanceWindow = IntPtr.Zero;
         try
         {
-            if (_capsuleDragBackgroundCapture != null)
-                host.BeginDragBackground();
             // No entrance morph on pull-out: the HWND must be ready for caption drag immediately.
             // A 90ms scale-in here only delays ownership hand-off and reads as sticky detach.
             host.ShowWithEntrance(
                 pointer,
                 animate: false,
                 DeepCapsuleCrossQueueDragScaleFrom,
-                DeepCapsuleCrossQueueDragMorphMilliseconds);
-            if (_capsuleDragBackgroundSnapshot is { } dragBackground)
-                host.UseDragBackground(dragBackground);
+                DeepCapsuleCrossQueueDragMorphMilliseconds,
+                alignToDragMessage: true);
             RefreshDeepCapsuleSlotTopmost();
             return host;
         }
@@ -332,6 +341,7 @@ public sealed partial class PaperWindow
 
     private void OnDeepCapsuleFloatingDragHostLocationChanged(object? sender, EventArgs e)
     {
+        if (ReferenceEquals(sender, _deepCapsuleFloatingDragHost)) SampleNativeQueueFloatingDrag();
         if (sender is not EdgeCapsuleDragWindow host ||
             !ReferenceEquals(host, _deepCapsuleFloatingDragHost) ||
             _deepCapsuleFloatingFullscreenAvoidanceWindow ==
@@ -378,8 +388,11 @@ public sealed partial class PaperWindow
 
     private void StartDeepCapsuleReorderDrag(DeviceScreenPoint currentScreenPos)
     {
+        _nativeQueueClickRevoked = true;
         _previewOriginReorderBaseline = null;
-        if (EdgeCapsuleDragWindow.HasActiveLease)
+        // Docked sorting owns its existing host and does not require the shared floating HWND.
+        // An unrelated docking animation must not cancel an ordinary edge reorder.
+        if (EdgeCapsuleDragWindow.HasActiveLease && ShouldUnlockDeepCapsuleCrossQueueDrag(currentScreenPos))
         {
             CancelDeepCapsuleReorderDrag();
             return;
@@ -443,8 +456,14 @@ public sealed partial class PaperWindow
         }
         _previewOriginReorderBaseline = previewOriginBaseline;
 
+        if ((_controller.EdgeCapsuleFreeQueuesEnabled || _nativeQueueWholeRequested) &&
+            !_controller.BeginNativeEdgeQueueDrag(_paper, _nativeQueueWholeRequested,
+                session.PointerDownScreenPosition, collapsedPreview))
+        {
+            CancelDeepCapsuleReorderDrag(restoreLayout: true);
+            return;
+        }
         _controller.BeginDeepCapsuleReorderDrag(_paper);
-        BeginCapsuleDragBackground(_edgeCapsuleHost.Handle);
         CloseDeepCapsuleFloatingDragHost();
         // The shared Drag HWND/tree was prewarmed once at idle, with pointer-down as the only
         // fallback. Reorder no longer queues paper-specific work on the interaction path.
@@ -472,7 +491,8 @@ public sealed partial class PaperWindow
         }
 
         if (IsDeepCapsuleDockedReordering &&
-            ShouldUnlockDeepCapsuleCrossQueueDrag(currentScreenPos))
+            ShouldUnlockDeepCapsuleCrossQueueDrag(currentScreenPos) &&
+            !EdgeCapsuleDragWindow.HasActiveLease)
         {
             BeginDeepCapsuleFloatingReorder(currentScreenPos);
             return;
@@ -481,20 +501,29 @@ public sealed partial class PaperWindow
         if (IsDeepCapsuleFloatingReordering)
         {
             UpdateEdgeCapsuleDragPointer(currentScreenPos);
+            if (!_controller.PreviewNativeEdgeQueueDrag(_paper, currentScreenPos,
+                    NativeQueueLogicalOwnerTop(currentScreenPos, session, floating: true), floating: true))
+                _controller.PreviewSingleCapsuleDropGhost(_paper,
+                    DeepCapsuleDropIndexForCurrentPosition(), currentScreenPos, floating: true);
             return;
         }
 
-        var geometry = DeepCapsuleMonitorGeometry();
-        var targetDeviceTop = currentScreenPos.Y - session.DockedPointerOffsetY;
-        if (!MoveEdgeCapsuleDockedReorder(
-                currentScreenPos,
-                geometry.DeviceYToLocalDip(targetDeviceTop)))
+        var logicalTop = NativeQueueLogicalOwnerTop(currentScreenPos, session, floating: false);
+        // Only crossing the original queue's first/last slot can pull a single
+        // dragged capsule back; internal sorting and joins have no magnetic motion.
+        var nativePreview = _controller.PreviewNativeEdgeQueueDrag(_paper,
+            currentScreenPos, logicalTop, floating: false);
+        // Visual pull never modifies hit testing or the eventual drop point.
+        var visualTop = _controller.NativeEdgeQueueMagnetizedOwnerTop(_paper.Id, logicalTop);
+        var boundedTop = EdgeCapsuleFreeQueuePolicy.ClampVisibleTop(visualTop,
+            DeepCapsuleMonitorGeometry().LocalWorkAreaDip.Height, PaperLayoutDefaults.CapsuleHeight);
+        if (!MoveEdgeCapsuleDockedReorder(currentScreenPos, boundedTop))
         {
             CancelDeepCapsuleReorderDrag(restoreLayout: true);
             return;
         }
         FlushEdgeCapsulePresentation(EdgeCapsuleTransitionReason.Drag);
-        PreviewDeepCapsuleReorderForCurrentPosition();
+        if (!nativePreview) PreviewDeepCapsuleReorderForCurrentPosition();
     }
 
     private void PreviewDeepCapsuleReorderForCurrentPosition()
@@ -505,6 +534,8 @@ public sealed partial class PaperWindow
             return;
         }
         var dropIndex = DeepCapsuleDropIndexForCurrentPosition();
+        _controller.PreviewSingleCapsuleDropGhost(_paper, dropIndex,
+            session.LastScreenPosition, floating: false);
         if (dropIndex == session.PreviewIndex)
         {
             return;
@@ -582,6 +613,8 @@ public sealed partial class PaperWindow
                 return;
             }
             WindowNative.BringToFrontNoActivate(floatingHost);
+            _controller.PrepareNativeEdgeQueueFloating(_paper.Id);
+            SampleNativeQueueFloatingDrag();
             RefreshDeepCapsuleSlotTopmost();
             Mouse.OverrideCursor = Cursors.SizeAll;
 #if DEBUG
@@ -655,6 +688,7 @@ public sealed partial class PaperWindow
             return;
         }
 
+        RefreshNativeQueueReleasePosition(dropPosition);
         EndDeepCapsuleReorderDrag(commit: true);
         ClearCapsuleInteractionKeyboardFocus();
     }
@@ -672,12 +706,8 @@ public sealed partial class PaperWindow
                 : 1.0;
         var horizontalDelta = Math.Abs(
             currentScreenPos.X - session.PointerDownScreenPosition.X);
-        if (horizontalDelta >= DeepCapsuleCrossQueueDragUnlockDistance * scaleX)
-        {
-            return true;
-        }
-
-        return HasDeepCapsuleDragEnteredAnotherMonitor(currentScreenPos);
+        return EdgeCapsuleFreeQueuePolicy.ShouldFloat(horizontalDelta / scaleX,
+            HasDeepCapsuleDragEnteredAnotherMonitor(currentScreenPos));
     }
     private bool HasDeepCapsuleDragEnteredAnotherMonitor(DeviceScreenPoint currentScreenPos)
     {
@@ -719,6 +749,12 @@ public sealed partial class PaperWindow
 
             if (commit)
             {
+                if (_controller.CommitNativeEdgeQueueDrag(_paper, session.LastScreenPosition,
+                        NativeQueueLogicalOwnerTop(session.LastScreenPosition, session, wasFloatingDrag), wasFloatingDrag))
+                {
+                    shouldAnimateFloatingDrop = _controller.State.EnableAnimations && _deepCapsuleFloatingDragHost != null;
+                    return;
+                }
                 if (!wasFloatingDrag)
                 {
                     _controller.ReorderDeepCapsule(_paper, DeepCapsuleDropIndexForCurrentPosition());
@@ -771,6 +807,10 @@ public sealed partial class PaperWindow
             // it before completing the controller gate, allowing the destination placement to be
             // measured and committed while the floating HWND is still visible.
             _previewOriginReorderBaseline = null;
+            _controller.EndSingleCapsuleDropGhost(_paper.Id);
+            _controller.EndNativeEdgeQueueDrag(_paper.Id);
+            _nativeQueueWholeRequested = false;
+            _nativeQueueClickRevoked = false;
             FinishEdgeCapsulePointerInteraction();
             _controller.CompleteDeepCapsuleReorderDrag();
             var handoffStarted = shouldAnimateFloatingDrop &&
@@ -788,12 +828,14 @@ public sealed partial class PaperWindow
                 }
                 FlushEdgeCapsulePresentation(EdgeCapsuleTransitionReason.FloatingTransfer);
             }
-            EndCapsuleDragBackground();
         }
     }
 
     private void CancelDeepCapsuleReorderDrag(bool restoreLayout = false)
     {
+        _controller.EndSingleCapsuleDropGhost(_paper.Id);
+        _controller.EndNativeEdgeQueueDrag(_paper.Id);
+        _nativeQueueWholeRequested = false;
         var wasReordering = IsDeepCapsuleReordering;
         var wasDockingHandoff = IsDeepCapsuleDockingHandoff;
         var wasDockingReveal = IsDeepCapsuleDockingReveal;
@@ -828,7 +870,6 @@ public sealed partial class PaperWindow
             }
 
             FlushEdgeCapsulePresentation(EdgeCapsuleTransitionReason.FloatingTransfer);
-            EndCapsuleDragBackground();
         }
     }
 
@@ -882,7 +923,8 @@ public sealed partial class PaperWindow
         var centerY = geometry.DeviceYToLocalDip(dragBounds.Top + dragBounds.Height / 2.0);
         // Real capsules start after slot 0 when the master capsule occupies that slot.
         var firstCenterY = DeepCapsuleTopForIndex(_edgeCapsule.Placement.VisualOffset) +
-            (PaperLayoutDefaults.CapsuleHeight / 2);
+            (PaperLayoutDefaults.CapsuleHeight / 2) +
+            (_controller.EdgeCapsuleFreeQueuesEnabled ? _edgeCapsule.Placement.TopOffsetDip : 0);
         var rawIndex = (centerY - firstCenterY) / slotHeight;
         var index = rawIndex >= originalIndex
             ? (int)Math.Floor(rawIndex)

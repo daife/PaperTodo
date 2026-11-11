@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using Application = System.Windows.Application;
 
 namespace PaperTodo;
@@ -37,15 +38,59 @@ public partial class App : Application
     private SingleInstanceHelper? _singleInstance;
     private int _handlingGlobalException;
 
+    static App()
+    {
+        // OnStartup is async void. Setting CurrentUICulture only inside that async execution
+        // context can be restored to the OS culture when control returns to the WPF Dispatcher.
+        // Establish the persisted UI culture on the root UI thread before App is constructed,
+        // InitializeComponent runs, or any Dispatcher work is queued. The existing OnStartup
+        // application remains a harmless idempotent re-apply during normal UI startup.
+        if (!McpBridge.IsRequested(Environment.GetCommandLineArgs()))
+        {
+            ApplyStartupCulturePreference(UiLanguages.LoadPersistedPreference());
+        }
+    }
+
+    public App()
+    {
+        // MCP is a stdio bridge process and never owns GUI edge surfaces or usage telemetry.
+        if (McpBridge.IsRequested(Environment.GetCommandLineArgs()))
+        {
+            return;
+        }
+
+        InitializeTelemetry();
+
+        // Pay known DComp publication and WPF HWND first-use costs during startup only when edge
+        // browsing is enabled. Users who keep the feature off should not create any prewarm HWNDs
+        // or compositor resources just for this path.
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.SystemIdle,
+            (Action)(() =>
+            {
+                if (AppController.Current?.State.ExperimentalEdgeCapsuleHoverPreview != true)
+                {
+                    return;
+                }
+
+                EdgeCapsuleQueueCompositionProxy.PrewarmLightweight(Dispatcher);
+            }));
+    }
+
     protected override async void OnStartup(StartupEventArgs e)
     {
-        if (McpBridge.IsRequested(e.Args))
+        var imageImportRequested = McpImageImportCommand.IsRequested(e.Args);
+        if (imageImportRequested || McpBridge.IsRequested(e.Args))
         {
             base.OnStartup(e);
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var exitCode = 0;
             try
             {
-                await McpBridge.RunAsync(e.Args);
+                if (imageImportRequested)
+                    exitCode = await McpImageImportCommand.RunAsync(e.Args);
+                else
+                    await McpBridge.RunAsync(e.Args);
             }
             catch (Exception ex)
             {
@@ -58,9 +103,10 @@ public partial class App : Application
                 {
                     // stderr is optional; never replace an MCP failure with a logging failure.
                 }
-                Environment.ExitCode = 1;
+                exitCode = 1;
             }
-            Shutdown();
+            Shutdown(exitCode);
+            Environment.ExitCode = exitCode;
             return;
         }
 
@@ -113,11 +159,20 @@ public partial class App : Application
         {
             _controller = new AppController();
         }
+        catch (OperationCanceledException)
+        {
+            // Declining historical recovery stops startup without creating blank
+            // data or presenting the user's choice as an application crash.
+            _singleInstance?.Dispose();
+            _singleInstance = null;
+            Shutdown();
+            return;
+        }
         catch (Exception ex)
         {
             WriteCrashLog(ex);
             MessageBox.Show(
-                Strings.Format("AppStartupFailureMessage", ex.Message),
+                WorkspaceFailureMessage.ForStartup(ex),
                 Strings.Get("AppStartupFailureTitle"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -152,6 +207,7 @@ public partial class App : Application
             _controller.ExecuteStartupCommand(startupCommand);
         }
         _controller.StartStateBackupPolicy();
+        _controller.StartCoreHistoryBackupPolicy();
         CompleteSingleInstanceStartup();
     }
 
@@ -246,6 +302,10 @@ public partial class App : Application
         {
             return;
         }
+
+        // A crash dialog pumps messages too. Stop queued persistence BEFORE displaying it,
+        // not merely by omitting an explicit final SaveNow call at the bottom of this handler.
+        _controller?.AbortPersistenceForTermination();
 
         // Classification must never prevent the crash log from being written.
         var isDesktopRuntimeLoadFailure = false;
@@ -399,3 +459,4 @@ public partial class App : Application
 #endif
     }
 }
+

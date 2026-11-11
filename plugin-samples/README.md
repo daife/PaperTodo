@@ -1,5 +1,8 @@
 # PaperTodo Plugin Development
 
+Workspace status also includes `WorkspaceNumber`, `DataFileName`, and `FollowsMainSettings`. Query the active filename before authorized external edits: `data.json` always remains the main workspace; `reload_data` / `merge_data` target the active workspace and never switch it.
+
+
 **Language: English | [简体中文](README.zh.md)**
 
 This is the **current PaperTodo plugin development manual**. It documents the current plugin contract, runtime boundaries, build workflow, and examples, with a concise API-version history and compatibility summary. Detailed historical trade-offs remain in `doc/DECISIONS.md`.
@@ -7,10 +10,10 @@ This is the **current PaperTodo plugin development manual**. It documents the cu
 New plugins use:
 
 ```json
-"apiVersion": "2.2"
+"apiVersion": "2.3"
 ```
 
-The current host exposes Protocol `2.2` and remains backward-compatible with `2.1`. Protocol `2.0` and earlier are no longer load-compatible. New plugins should target `2.2`; existing `2.1` plugins can keep running as long as they do not declare 2.2-only features.
+The current host exposes Protocol `2.3` and remains backward-compatible with `2.1` and `2.2`. Protocol `2.0` and earlier are no longer load-compatible. New plugins should target `2.3`; existing plugins can keep running within their declared contract.
 
 ### Plugin API version history
 
@@ -20,14 +23,15 @@ The current host exposes Protocol `2.2` and remains backward-compatible with `2.
 MinimumSupportedApiVersion <= plugin.apiVersion <= CurrentApiVersion
 ```
 
-A newer host may load an older compatible plugin. An older host must reject a plugin that requires a newer API. PaperTodo currently supports **2.1 through 2.2**.
+A newer host may load an older compatible plugin. An older host must reject a plugin that requires a newer API. PaperTodo currently supports **2.1 through 2.3**.
 
 | API | Status | Main contract milestones |
 | --- | --- | --- |
 | 1.x | Legacy / unsupported | Early paper-body contracts. Known milestones include 1.2 moving plugin settings/state into the independent plugin data store, and 1.8 adding host-owned Edge Mini views. |
 | 2.0 | Experimental / unsupported | Transitional generation that introduced host-rendered Top Bar concepts while still carrying separate provider app Runtime and per-Paper Web Runtime paths. It was superseded rather than kept load-compatible. |
 | 2.1 | Supported minimum | Consolidated background work into one provider Runtime; Body/Mini are frontend surfaces. Includes Workspace Paper/Todo/Note access, Runtime state/Papers, host-rendered Top Bar and Todo contributions, global shortcuts/custom shortcut actions, paper menus, note-image reads and temporary popups. |
-| 2.2 | Current | Adds cross-paper presentation, public application Settings API (`settings.read/update`), settings `type: "action"` command buttons, and `startupPaper.presentation: "hidden"`. New plugins should target 2.2. |
+| 2.2 | Supported | Adds cross-paper presentation, public application Settings API (`settings.read/update`), settings `type: "action"` command buttons, `startupPaper.presentation: "hidden"`, reminder trigger state/events, and Web Runtime host-event subscriptions. |
+| 2.3 | Current | Adds `MenuOnly` / `menuOnly` to top-bar action descriptors, showing an action only in the plugin action menu without creating a title-bar button. New plugins should target 2.3. |
 
 **Versioning rule:** a backward-compatible new plugin-visible contract (manifest field/type, permission, event, public API surface, or new observable semantics) advances the minor version after the current minor is published. Host-only implementation changes and bug fixes do not. Breaking an existing plugin contract advances the major version. Multiple compatible additions developed before one minor is released may ship together in that minor.
 
@@ -73,7 +77,7 @@ plugins/com.example.hello/
   "id": "com.example.hello",
   "name": "Hello",
   "version": "1.0.0",
-  "apiVersion": "2.2",
+  "apiVersion": "2.3",
   "stateVersion": 1,
   "entry": "web/index.html"
 }
@@ -177,7 +181,7 @@ Native `plugin.json`:
   "id": "com.example.hello-native",
   "name": "Hello Native",
   "version": "1.0.0",
-  "apiVersion": "2.2",
+  "apiVersion": "2.3",
   "stateVersion": 1,
   "entry": "HelloPlugin.dll"
 }
@@ -233,7 +237,7 @@ plugins/
    └─ .runtime/
 ```
 
-`data` and `builtin.markdown` are reserved host IDs. A plugin ID must contain 3–120 ASCII letters, digits, `.`, `_`, or `-`. Directories beginning with `.` or `_` are not discovered.
+The host reserves `builtin.markdown` and the directory names `data`, `data1` through `data5` (case-insensitive). A plugin ID must contain 3–120 ASCII letters, digits, `.`, `_`, or `-`. Directories beginning with `.` or `_` are not discovered.
 
 A final Native plugin directory should contain only what is required at runtime. Do not ship unnecessary PDB/XML files, and do not duplicate host-provided shared assemblies such as `PaperTodo.Plugin.Abstractions`, Windows SDK / WinRT, or WebView2 shared assemblies.
 
@@ -248,7 +252,7 @@ The current manifest supports:
 | `name` | Display name; falls back to the ID when empty |
 | `description` | Plugin description |
 | `version` | Plugin version; must parse as `Version` |
-| `apiVersion` | Use `"2.2"` for new plugins; `"2.1"` remains load-compatible |
+| `apiVersion` | Use `"2.3"` for new plugins; `"2.1"` and `"2.2"` remain load-compatible |
 | `stateVersion` | Target version for host-managed JSON; used by both per-paper frontend state and provider Runtime state; at least 1 |
 | `maxPaperInstances` | Optional; maximum number of real Papers for the same provider. Defaults to `1`; `0` means unlimited. Hidden/collapsed Papers still count |
 | `entry` | Web main page or Native entry DLL; must stay inside the plugin directory |
@@ -278,7 +282,7 @@ Both `entry` and `miniEntry` must remain inside the plugin directory. `miniEntry
   "id": "com.example.weather",
   "name": "Weather",
   "version": "1.0.0",
-  "apiVersion": "2.2",
+  "apiVersion": "2.3",
   "stateVersion": 1,
   "entry": "web/index.html",
   "miniEntry": "web/mini.html",
@@ -537,6 +541,8 @@ List returns an array. Each entry has a stable `id`, `category`, localized `titl
 
 The catalog includes general/language/startup, privacy, appearance/fonts/background preferences, Note/Todo/title/capsule options, edge browsing, reminders, window/focus/interaction options, scripts, MCP, and global shortcuts. Values are saved preferences: dependent settings may remain selected but have no effect until their parent feature is enabled. Shortcuts expose `.gesture` and `.enabled`; each edge sequence uses a modifier chord plus 1 and applies that prefix to keys 1–9. Active shortcut-editor drafts/recording and registration conflicts are reported instead of silently overriding them. Language reports `requires_restart: true` and does not force a restart.
 
+The retired `window.tether_visibility_link` and `window.tether_minimized` IDs are no longer listed; Get/Set returns `setting_not_found`. Window binding always hides and restores the actual paper with its target. Older saved values for these choices are ignored; `window.tether_enabled`, `window.tether_edge` and `window.tether_gap` remain supported.
+
 Settings are an explicit typed catalog. Per-paper geometry/content, live queue state, migration fields, plugin-private settings, file contents and one-shot UI commands such as import/export/reset are **not** setting values. These retain their existing APIs/owners; no raw `AppState` reflection endpoint is exposed. Future public settings must be explicitly registered with validation and effects.
 
 All three adapters share one service. Core preferences synchronously save through `StateStore`, restore their previous values and coupled state on save failure, then refresh relevant UI/runtime paths. Startup registration and background preferences retain their existing independent persistence owners. Errors include `setting_not_found`, `invalid_setting_value`, `setting_dependency`, `settings_busy`, `setting_read_only`, `shortcut_conflict`, and `save_failed`. A committed setting is not reported as failed merely because a later UI refresh failed.
@@ -550,18 +556,15 @@ A manifest may declare:
 
 ```text
 papers.read
-papers.observe
 papers.create
 papers.delete
 
 todos.read
-todos.observe
 todos.append
 todos.update
 todos.delete
 
 notes.read
-notes.observe
 notes.append
 notes.replace
 ```
@@ -594,7 +597,7 @@ Permission combinations that are easy to miss:
 - `notes.write` append/fill-blank operations use `notes.append`, while replace uses `notes.replace`;
 - a paper-session plugin cannot delete the Paper that hosts its own active session; Runtime has no host Paper and is not subject to this single-Paper self-deletion restriction.
 
-Observe permissions are independent of Read permissions. Without the matching read permission, events may still be delivered under observe permission, but the host removes sensitive fields.
+Read permissions allow both querying a resource and subscribing to its change events. Legacy `papers.observe`, `todos.observe`, and `notes.observe` declarations still allow subscriptions but do not grant querying or access to sensitive fields without the matching read permission.
 
 Native paper session:
 
@@ -621,7 +624,50 @@ const dispose = papertodo.onHostEvent(
 );
 ```
 
-Subscribable events are `paper.created`, `paper.changed`, `paper.deleted`, `todo.created`, `todo.changed`, `todo.deleted`, and `note.changed`. Subscriptions become invalid automatically when the session becomes invalid or is disposed; plugins should still unsubscribe promptly when a listener is no longer needed.
+Subscribable events are `paper.created`, `paper.changed`, `paper.deleted`, `todo.created`, `todo.changed`, `todo.deleted`, `note.changed`, and API 2.2 `todo.reminderUpcoming`. Actual reminder triggers remain regular `todo.changed` events. Subscriptions become invalid automatically when the session becomes invalid or is disposed; plugins should still unsubscribe promptly when a listener is no longer needed.
+
+### Reminder API (2.2)
+
+PaperTodo emits a one-shot **upcoming notification event about five seconds before a reminder is due**. Upcoming is not globally ordered with debounced user-change events; its Todo snapshot reflects the state observed at notification time. The `occurredAt` of a batched user event reflects scan time rather than the exact edit time. Plugins may suppress only the default presentation. The eventual reminder transition remains an ordinary `TodoChanged`.
+
+- `todos.read` grants queries and subscription to Native `PaperTodoEventKind.TodoReminderUpcoming` / Web `todo.reminderUpcoming`. The event contains a `todo` snapshot, one-time `notificationId`, and System `metadata`. Legacy `todos.observe` grants remain valid only for the older events, not this new advance hook.
+- The host aims to emit five seconds before due. A reminder created or rescheduled with less lead time receives an immediate best-effort notice; already-overdue reminders at startup use normal host presentation without an advance notice. A reschedule invalidates the old token.
+- A plugin with **`todos.update`** may suppress the default notification before due through Native `IPaperReminderNotificationControl.SuppressDefaultReminderNotification(notificationId)` or Web `papertodo.workspace.request('reminders.suppressDefault', { notificationId })`. It returns `true` on success, `false` for invalid/expired tokens. This only suppresses the PaperTodo paper/tray presentation and sound; it does not change the todo or schedule. Multiple plugins can receive notices and may independently display their own notifications.
+- The host never blocks its UI awaiting JavaScript. Web plugins have up to the remaining advance window to respond; absent/late responses fall back to the default presentation. Completing/cancelling/rescheduling the Todo invalidates the token.
+- A reminder either successfully surfaced by the host or suppressed by a plugin is acknowledged with `reminderTriggered: true`, followed by System `TodoChanged`. Filter `!before.reminderTriggered && after.reminderTriggered`; a generic Reminder changed field may also mean rescheduling.
+- Regular pending `TodoChanged` callbacks run **after** the host presentation, not as a hidden veto hook. Events are live/best effort without replay or cross-restart exactly-once guarantees. A plugin's own display failure after suppression is not retried by the host.
+- Long-running listeners belong in provider Runtime; Web Body and Runtime support `onHostEvent`, Web Mini does not. Keep Native callbacks short.
+
+Native Runtime example (requires `todos.read` + `todos.update`):
+
+```csharp
+var stop = context.Workspace.Subscribe(
+    new PaperTodoEventFilter { Kinds = new HashSet<PaperTodoEventKind>
+        { PaperTodoEventKind.TodoReminderUpcoming } },
+    evt =>
+    {
+        if (evt is TodoReminderUpcomingEvent upcoming &&
+            context.Workspace is IPaperReminderNotificationControl control)
+        {
+            // Only suppress if this plugin is taking over presentation.
+            control.SuppressDefaultReminderNotification(upcoming.NotificationId);
+        }
+    });
+```
+
+Web Runtime example (requires `permissions: ["todos.read", "todos.update"]`):
+
+```js
+const stop = papertodo.onHostEvent(['todo.reminderUpcoming'], async event => {
+  const { notificationId, todo } = event;
+  // If the plugin will handle presentation, cancel the host's default:
+  const suppressed = await papertodo.workspace.request(
+    'reminders.suppressDefault', { notificationId });
+  if (suppressed) {
+    // Render the pet's own notification.
+  }
+});
+```
 
 Paper, Todo, Note and Note-image reads use the current host model/assets without committing editors. Recent typing may appear after the normal editor/save synchronization; reads do not force a flush. When an external write targets the same built-in Markdown paper, PaperTodo commits that paper's pending user text first so the write follows it; writes to other papers do not invoke unrelated third-party Body `Commit()`. Core `data.json` saves still synchronize built-in Markdown normally and do not use third-party Body `Commit()` as a global save hook. MCP creation/append accepts the new Todo's initial fields under additive writes; changing existing content still needs full writes.
 
@@ -788,7 +834,7 @@ Manifest:
 
 ```json
 {
-  "apiVersion": "2.2",
+  "apiVersion": "2.3",
   "entry": "web/index.html",
   "runtime": "web/background.html",
   "capabilities": ["runtime"]
@@ -845,6 +891,24 @@ papertodo.onEvent(async message => {
 Runtime is an independent backend surface and does not receive `paper`, `body`, or `mini` presentation APIs. Runtime-document navigation, renderer failure, disappearance of the final real plugin Paper, or Runtime disposal all remove Global actions. Web Mini cannot register Global Top Bar actions either.
 
 See `PaperTodo.Plugin.TopBarWeb` for a complete runnable example.
+
+### Menu-only actions (API 2.3)
+
+Both `TopBar.SetPaperActions(...)` and `GlobalTopBar.SetActions(...)` accept `MenuOnly = true` on an action descriptor; Web uses `menuOnly: true`. The default is `false`, preserving existing title-bar and responsive overflow behavior. Plugins using this field declare `apiVersion: "2.3"`.
+
+```csharp
+context.GlobalTopBar.SetActions([
+    new PaperTopBarAction { Id = "inspect", ToolTip = "Inspect paper", MenuOnly = true }
+]);
+```
+
+```js
+await papertodo.globalTopBar.setActions([
+  { id: 'inspect', toolTip: 'Inspect paper', menuOnly: true }
+]);
+```
+
+Menu-only actions require no icon, create no title-bar button, and reserve no title-bar space. `ToolTip` supplies the menu label, falling back to `Id` when empty. Existing `Visible`, `Enabled`, ordering, count limits, callbacks and owner cleanup still apply. These actions use the existing plugin action menu and do not join the built-in shortcut ordering/hiding settings. The targeted plain-text `PaperActions.SetActions(paperId, ...)` API is unchanged.
 
 ### 7.6 Protocol 2.1 Todo and Top Bar presentation extensions
 
@@ -1150,7 +1214,7 @@ papertodo.request(method, params);    // root transport
 papertodo.onEvent(listener);
 ```
 
-Runtime `initialize` contains `settings`, provider Runtime `state` plus its versions, and the current provider `papers` snapshot. Later setting changes produce `settingsChanged`; Paper add/remove events and Body messages produce `paperEvent`. Runtime does not receive paper-session APIs such as `paper`, `body`, `mini`, or `saveState`, and it does not have the Web `onHostEvent` subscription bridge.
+Runtime `initialize` contains `settings`, provider Runtime `state` plus its versions, and the current provider `papers` snapshot. Later setting changes produce `settingsChanged`; Paper add/remove events and Body messages produce `paperEvent`. API 2.2 also provides `papertodo.onHostEvent(types, listener, options)` for Workspace events, with the same observe/read permissions as Native. Runtime does not receive paper-session APIs such as `paper`, `body`, `mini`, or `saveState`.
 
 `papertodo.papers.postBody(...)` / Native `Papers.PostToBody(...)` only attempts delivery to the current live Body. Its return value tells whether that Body currently accepts the message; a Web Body may temporarily buffer until its document is ready. It is not a persistent message queue, business ACK, or guarantee of final delivery.
 
@@ -1184,7 +1248,7 @@ For select controls that need host-consistent visuals, use `PaperBodyContext.Bod
 | Sample | Focus |
 | --- | --- |
 | `PaperTodo.Plugin.Protocol21Web` | **Protocol 2.1 contribution-focused sample**: Todo row actions, Top Bar labels, latest `TodoSnapshot` |
-| `PaperTodo.Plugin.TopBarWeb` | **Protocol 2.2 Top Bar/action-focused sample**: body Paper action + Web Runtime Global action, character/Stroke SVG icons, target Paper context, Workspace reuse |
+| `PaperTodo.Plugin.TopBarWeb` | **Protocol 2.3 Top Bar/action-focused sample**: body Paper action + menu-only Web Runtime Global action, target Paper context, Workspace reuse |
 | `PaperTodo.Plugin.SampleClock` | Main Native sample: settings, background updates, standard capsule, custom WPF capsule, dedicated WPF mini |
 | `PaperTodo.Plugin.OfficialClockWeb` | Main Web sample: body/mini pages, `miniEntry`, state/settings synchronization, startup Paper, background updates |
 | `PaperTodo.Plugin.FocusTimer` | Stateful Native interaction: body and dedicated mini share a timer model; start/pause/resume directly from Mini |
@@ -1197,9 +1261,9 @@ When starting a new plugin, copy the smallest structure from the sample closest 
 
 ### Manifest / Runtime
 
-- targeting `apiVersion: "2.0"` or earlier for a new plugin; the current host supports `2.1`–`2.2`, and new plugins should target `2.2`;
+- targeting `apiVersion: "2.0"` or earlier for a new plugin; the current host supports `2.1`–`2.3`, and new plugins should target `2.3`;
 - plugin directory name does not match `id`;
-- `id` uses invalid characters or the reserved host IDs `data` / `builtin.markdown`;
+- `id` uses invalid characters or the reserved host IDs `data` / `data1`–`data5` / `builtin.markdown`;
 - Web declares `runtime`, but the default `runtime.html` is missing, or an explicit `runtime` path is missing/outside the Web `entry` static directory;
 - Native declares `runtime` but does not implement `IPaperPluginRuntimeProvider`;
 - assuming a Runtime starts just because a plugin is installed while it has zero real plugin Papers;
@@ -1264,7 +1328,7 @@ When starting a new plugin, copy the smallest structure from the sample closest 
 
 ## 14. Before Submitting a Plugin
 
-- new `plugin.json` targets the current `apiVersion: "2.2"`; use `2.1` only when intentionally staying within the 2.1 contract;
+- new `plugin.json` targets the current `apiVersion: "2.3"`; use `2.1` or `2.2` only when intentionally staying within an older contract;
 - all metadata lives only in `plugin.json`; the Native entry DLL provides behavior only;
 - when declaring `runtime`: Native implements `IPaperPluginRuntimeProvider`; Web provides `runtime.html` next to `entry` by default, or uses `runtime` to select another entry inside the same Web static directory;
 - when Runtime needs plugin settings, use its own `context.Settings.Json` + `Settings.Subscribe(...)` / `papertodo.settings.get()` + `settingsChanged`; do not borrow a hidden paper session;
@@ -1282,3 +1346,22 @@ When starting a new plugin, copy the smallest structure from the sample closest 
 - Edge Mini does not depend on keyboard input;
 - declare only permissions / `runtime` that are actually needed;
 - 0↔1 Runtime ownership is correct when switching providers or deleting Papers; exiting PaperTodo fully removes Runtime and Global Top Bar contributions.
+
+## Explicit data.json reload (host 2.2 capability)
+
+Native Body/Runtime sessions use `Workspace.ReloadData()` and `Workspace.GetDataReloadStatus()`. Web Body/Mini/Runtime sessions use the Workspace bridge:
+
+Plugin calls to `ReloadData()` / `MergeData()` and Web `data.reload` / `data.merge` require the high-risk `data.import` permission in the plugin manifest. `data.status` remains readable without that grant. MCP continues to use its existing full-write gate.
+
+```js
+const result = await papertodo.workspace.request('data.reload', {});
+const status = await papertodo.workspace.request('data.status', {});
+```
+
+MCP exposes explicit `reload_data` and three-way `merge_data` (both require full writes), plus read-only `get_data_reload_status`. No file watcher, polling, revision history or normal-autosave fingerprint comparison is installed. Ordinary saves can overwrite external file edits until a deliberate reload/merge. Explicit requests fence obsolete queued saves; system termination still blocks new storage writes.
+
+Default `reload_data` adopts the validated active-workspace file as authoritative and may replace unsaved changes. For three-way merge, preserve the complete original JSON read **before editing**, then supply it to MCP `merge_data(baseline_json: originalJson)`, Native `Workspace.MergeData(originalJson)`, or Web `papertodo.workspace.request('data.merge', { baselineJson: originalJson })`. The argument is the original JSON string, not a path or a subsequently saved version. **Missing, blank, or invalid baselines return `invalid`**, even when current and disk states are equal. True conflicts obey `general.data_merge_conflicts` (`ask`, `external`, `internal`), affecting only conflicting values. Content merges at field level, not by lines. MCP retains the serialized request size limit of 8,000,000 characters; larger snapshots should use Native integration or domain APIs.
+
+On resolution, the host verifies that the external input has not changed, archives conflicting input, and commits through its atomic writer before applying the result. If the source changes during review, the merge aborts without installing the stale result. A queued merge returns `Outcome: pending` and `Applied: false`; query `get_data_reload_status` until `IsReloading` is false for its final outcome. The originating paper session may be released after reconciliation. This is not plugin-code hot reload. Prefer domain APIs for ordinary Todo/Note edits.
+
+See `doc/ARCHITECTURE.md` and D-060/061/063; D-062's regular-save file-monitoring policy was superseded. Shutdown/crash/passive disposal does not run a final save; explicit user exit is canceled if required writes fail.

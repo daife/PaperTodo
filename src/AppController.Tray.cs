@@ -528,6 +528,8 @@ public sealed partial class AppController
         menu.Items.Add(TrayTitleBar(menu));
         menu.Items.Add(TraySeparator());
 
+        if (WorkspaceOptions.Enabled)
+            menu.Items.Add(TrayWorkspaceSelector(menu));
         menu.Items.Add(TrayPaperToolbar(menu));
 
         if (State.Papers.Count > 0)
@@ -580,6 +582,188 @@ public sealed partial class AppController
 
             RebuildTrayMenu(menu);
         }
+    }
+
+    // This row fills the menu width established by the other items; neither the
+    // workspace count nor the inline confirmation may widen the popup.
+    private sealed class TrayWorkspaceRow : Grid
+    {
+        protected override Size MeasureOverride(Size constraint)
+        {
+            // Popup initially measures with infinite width. Use the width assigned
+            // by the other rows so star columns really share the remaining space.
+            var width = double.IsPositiveInfinity(constraint.Width) ? ActualWidth : constraint.Width;
+            var desired = base.MeasureOverride(new Size(width, constraint.Height));
+            return new Size(0, desired.Height);
+        }
+
+        protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+        {
+            base.OnRenderSizeChanged(sizeInfo);
+            if (sizeInfo.WidthChanged) InvalidateMeasure();
+        }
+    }
+
+    private MenuItem TrayWorkspaceSelector(ContextMenu menu)
+    {
+        var item = new MenuItem
+        {
+            Style = SharedTrayToolbarItemStyle,
+            StaysOpenOnClick = true,
+            IsEnabled = !_workspaceSwitching
+        };
+        AutomationProperties.SetAutomationId(item, "TrayWorkspaceSelector");
+
+        // One compact row, matching the settings page's rounded numeric segments.
+        var row = new TrayWorkspaceRow
+        {
+            Height = 26,
+            Margin = new Thickness(3, 0, 3, 0)
+        };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var headingText = new TextBlock
+        {
+            Text = Strings.Get("WorkspaceSettingsTitle"),
+            Foreground = TrayWeakTextBrush,
+            FontSize = AppTypography.Scale(12),
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(1, 0, 9, 0)
+        };
+        var heading = TrayToolbarAction(menu, headingText,
+            SettingsSidebarLocalized("打开工作区设置", "Open workspace settings",
+                "ワークスペース設定を開く", "작업 공간 설정 열기"),
+            () => ShowSettingsWindow(SettingsPage.Workspaces));
+        heading.Width = double.NaN;
+        heading.VerticalAlignment = VerticalAlignment.Center;
+        AutomationProperties.SetAutomationId(heading, "TrayWorkspaceSettings");
+        row.Children.Add(heading);
+        var choices = new ContentPresenter
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        Grid.SetColumn(choices, 1);
+        row.Children.Add(choices);
+
+        void ShowConfirmation(int target)
+        {
+            heading.Visibility = Visibility.Collapsed;
+            Grid.SetColumn(choices, 0);
+            Grid.SetColumnSpan(choices, 2);
+            var actions = new Grid
+            {
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            actions.Children.Add(new TextBlock
+            {
+                Text = SettingsSidebarLocalized(
+                    "切换到工作区" + target,
+                    "Switch to " + target,
+                    target + "に切替",
+                    target + "로 전환"),
+                Foreground = TrayTextBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = AppTypography.Scale(11),
+                FontWeight = FontWeights.SemiBold,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(0, 0, 6, 0)
+            });
+            var confirm = PluginPageButton(SettingsSidebarLocalized(
+                "是", "Yes", "はい", "예"));
+            confirm.MinWidth = 28;
+            confirm.Height = 22;
+            confirm.Padding = new Thickness(4, 1, 4, 1);
+            confirm.Click += (_, e) =>
+            {
+                e.Handled = true;
+                InvokeTrayAction(menu, () => { _ = SwitchWorkspaceAsync(target); });
+            };
+            var cancel = PluginPageButton(SettingsSidebarLocalized(
+                "否", "No", "いいえ", "아니요"));
+            cancel.MinWidth = 28;
+            cancel.Height = 22;
+            cancel.Padding = new Thickness(4, 1, 4, 1);
+            cancel.Click += (_, e) =>
+            {
+                e.Handled = true;
+                ShowChoices();
+            };
+            Border Frame(Button button) => new()
+            {
+                BorderBrush = TrayBorderBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Child = button
+            };
+            var confirmFrame = Frame(confirm);
+            confirmFrame.Margin = new Thickness(0, 0, 3, 0);
+            var cancelFrame = Frame(cancel);
+            Grid.SetColumn(confirmFrame, 1);
+            Grid.SetColumn(cancelFrame, 2);
+            actions.Children.Add(confirmFrame);
+            actions.Children.Add(cancelFrame);
+            choices.Content = actions;
+        }
+
+        void ShowChoices()
+        {
+            heading.Visibility = Visibility.Visible;
+            Grid.SetColumn(choices, 1);
+            Grid.SetColumnSpan(choices, 1);
+            var existing = WorkspaceOptions.SlotNumbers.ToHashSet();
+            var firstEmpty = Enumerable.Range(2, 4).FirstOrDefault(number => !existing.Contains(number));
+            var numbers = WorkspaceOptions.SlotNumbers.ToList();
+            if (firstEmpty != 0) numbers.Add(firstEmpty);
+            var segments = numbers.Select(number => (
+                Key: number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                Label: existing.Contains(number) ? number.ToString(UiLanguages.EffectiveCulture) : string.Empty
+            )).ToArray();
+            var selector = (Border)CreateSegmentSelector(segments,
+                WorkspaceNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                async key =>
+                {
+                    var target = int.Parse(key, System.Globalization.CultureInfo.InvariantCulture);
+                    if (target == firstEmpty)
+                    {
+                        await CreateWorkspaceAsync();
+                        if (menu.IsOpen)
+                        {
+                            // Workspace controls already refreshed the primary tray menu.
+                            if (!ReferenceEquals(menu, _trayMenu)) RebuildTrayMenu(menu);
+                            menu.Focus();
+                        }
+                    }
+                    else if (!IsPaperExportActive && existing.Contains(target) && target != WorkspaceNumber)
+                        ShowConfirmation(target);
+                });
+            var tiles = ((Grid)selector.Child).Children.OfType<Border>().ToArray();
+            if (IsPaperExportActive)
+                foreach (var tile in tiles.Take(existing.Count)) tile.IsEnabled = false;
+            if (firstEmpty != 0)
+            {
+                var tile = tiles[^1];
+                var tooltip = SettingsSidebarLocalized(
+                    "新建工作区", "Create workspace", "ワークスペースを作成", "작업 공간 만들기");
+                tile.Child = CreateTrayWorkspacePlusIcon();
+                tile.ToolTip = tooltip;
+                ToolTipService.SetInitialShowDelay(tile, 300);
+                AutomationProperties.SetName(tile, tooltip);
+                AutomationProperties.SetAutomationId(tile, "TrayCreateWorkspace");
+            }
+            selector.Margin = new Thickness(0);
+            selector.Height = 24;
+            choices.Content = selector;
+        }
+
+        ShowChoices();
+        item.Header = row;
+        item.Click += (_, e) => e.Handled = true;
+        return item;
     }
 
     private MenuItem TrayItem(
@@ -720,12 +904,12 @@ public sealed partial class AppController
 
         var newTodoButton = TrayToolbarAction(
             menu,
-            CreateTrayAddIcon("✓"),
+            CreateTrayAddIcon(PaperTypes.Todo),
             Strings.Get("TrayNewTodo"),
             () => CreatePaper(PaperTypes.Todo, show: true));
         var newNoteButton = TrayToolbarAction(
             menu,
-            CreateTrayAddIcon("✎"),
+            CreateTrayAddIcon(PaperTypes.Note),
             Strings.Get("TrayNewNote"),
             () => CreatePaper(PaperTypes.Note, show: true));
 
@@ -738,6 +922,7 @@ public sealed partial class AppController
         grid.Children.Add(newTodoButton);
         grid.Children.Add(newNoteButton);
 
+        AutomationProperties.SetAutomationId(item, "TrayPaperToolbar");
         item.Header = grid;
         item.Click += (_, e) => e.Handled = true;
         item.PreviewKeyDown += (_, e) =>
@@ -865,6 +1050,20 @@ public sealed partial class AppController
         };
     }
 
+    private FrameworkElement CreateTrayWorkspacePlusIcon() => new System.Windows.Shapes.Path
+    {
+        Width = 10,
+        Height = 10,
+        Stretch = Stretch.Uniform,
+        Data = Geometry.Parse("M 7,1.75 L 7,12.25 M 1.75,7 L 12.25,7"),
+        Stroke = TrayTextBrush,
+        StrokeThickness = 1.2,
+        StrokeStartLineCap = PenLineCap.Round,
+        StrokeEndLineCap = PenLineCap.Round,
+        HorizontalAlignment = HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+
     private FrameworkElement CreateTrayVisibilityIcon(bool anyShown, bool allShown)
     {
         var icon = new Grid
@@ -910,9 +1109,43 @@ public sealed partial class AppController
         return icon;
     }
 
-    private FrameworkElement CreateTrayAddIcon(string glyph)
+    private FrameworkElement CreateTrayAddIcon(string paperType)
     {
-        return CreateTrayAddVectorIcon(glyph);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
+        presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        var icon = new ContentControl
+        {
+            Template = new ControlTemplate(typeof(ContentControl)) { VisualTree = presenter },
+            Foreground = TrayTextBrush,
+            Focusable = false,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            SnapsToDevicePixels = true,
+            UseLayoutRounding = true
+        };
+        icon.Content = paperType == PaperTypes.Note
+            ? PaperWindow.CreateTopBarNewNoteIcon(icon)
+            : PaperWindow.CreateTopBarNewTodoIcon(icon);
+        return icon;
+    }
+
+    private FrameworkElement CreateTrayPaperTypeVectorIcon(PaperData paper)
+    {
+        return new VectorGlyphElement(
+            PaperTypeIcon(paper),
+            new FontFamily("Segoe UI Symbol"),
+            PaperTypeIconFontSize(paper),
+            FontWeights.SemiBold)
+        {
+            Foreground = TrayTextBrush,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
     }
 
     private MenuItem TrayPaperItem(ContextMenu menu, PaperData paper)

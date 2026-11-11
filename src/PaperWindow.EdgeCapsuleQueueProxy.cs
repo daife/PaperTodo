@@ -154,9 +154,6 @@ public sealed partial class PaperWindow
     internal IntPtr EdgeCapsuleQueueProxySourceHandle =>
         _edgeCapsuleHost?.Handle ?? IntPtr.Zero;
 
-    internal void SetEdgeCapsuleQueueProxyMaterialCaptureSuspended(bool suppressed) =>
-        _edgeCapsuleHost?.SetSampledBackgroundCaptureSuspended(suppressed);
-
     internal bool CanRouteEdgeCapsuleQueueProxyInput =>
         CanEnterEdgeCapsulePreview;
 
@@ -243,7 +240,7 @@ public sealed partial class PaperWindow
               _edgeCapsuleHost.MatchesPresentation(endpoint);
     }
 
-    internal void InvalidateEdgeCapsuleQueueProxyPointer()
+    internal void InvalidateEdgeCapsuleQueueProxyPointer(DeviceScreenPoint? pointer)
     {
         if (_windowLifecycle != PaperWindowLifecycleState.Alive ||
             IsClosed)
@@ -251,7 +248,6 @@ public sealed partial class PaperWindow
             return;
         }
 
-        var pointer = CaptureEdgeCapsulePointerPosition();
         _controller.NotifyEdgeCapsulePreviewPhysicalPointer(
             this,
             pointer);

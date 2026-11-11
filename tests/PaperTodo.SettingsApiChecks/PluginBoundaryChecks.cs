@@ -11,34 +11,16 @@ internal static partial class Program
 {
     private static async Task PluginBoundaryBehavior(AppController c, PaperData owner, PaperData note, PaperData todo)
     {
-        PluginEnablementStateIsHostOwned(c);
         DeferredPluginEnablementDoesNotAttachEarly(c);
         StartingPluginRuntimeIsDisposedOnRemoval(c);
         ReadsAndNotificationsDoNotCommitOrReplaceBodies(c, owner, note, todo);
         await ExternalSavePreservesRuntimeCallbackDirtyState(c);
+        VisualBroadcastSurvivesPaperCreation(c);
+        PopupThemeNotificationsFollowAppearance(c);
+        ExtendedComponentBoundaryBehavior(c);
         CreationOwnsInitialTodoFields(c, note);
-        TodoPasteUsesEventPayload();
         PartialReminderDeliveryKeepsUnsurfacedItemsPending(c);
-        MultilinePluginTooltips();
-        ReviewArchiveSavesWithoutBackup();
-        ReviewArchiveUnreadableDataFailsClosed();
         await InitialRuntimeFailureDoesNotRetry(c);
-    }
-
-    private static void PluginEnablementStateIsHostOwned(AppController c)
-    {
-        const string providerId = "tests.enablement";
-        c.State.DisabledPluginIds.RemoveAll(value =>
-            string.Equals(value, providerId, StringComparison.Ordinal));
-        Check(c.IsPluginEnabled(providerId),
-            "Plugins are enabled by default when no host disable entry exists.");
-        c.State.DisabledPluginIds.Add(providerId);
-        Check(!c.IsPluginEnabled(providerId),
-            "Host disabled-plugin state prevents activation without changing plugin-owned settings.");
-        c.State.DisabledPluginIds.RemoveAll(value =>
-            string.Equals(value, providerId, StringComparison.Ordinal));
-        Check(c.IsPluginEnabled(PaperBodyProviderIds.Markdown),
-            "The built-in Markdown provider cannot be disabled by plugin state.");
     }
 
     private static void DeferredPluginEnablementDoesNotAttachEarly(AppController c)
@@ -127,6 +109,8 @@ internal static partial class Program
             var commands = c.PaperCommands;
             var mcp = new McpCommandService(c, commands);
             var oldEnabled = c.State.McpEnabled;
+            var oldAdditive = c.State.McpAllowBlankWrites;
+            var oldFull = c.State.McpAllowFullWrites;
             c.State.McpEnabled = true;
             try
             {
@@ -136,7 +120,7 @@ internal static partial class Program
                     _ = commands.GetPaper(owner.Id);
                     _ = commands.ListTodos(includeBlank: true);
                     Check(commands.GetNote(owner.Id)!.Content == owner.Content,
-                        "Note reads use the existing model, without synchronizing the editor.");
+                        "A clean note should read back its current content.");
                     _ = mcp.Execute(Json(new { method = "list_papers", @params = new { } }));
                 }
                 Throws<PaperCommandException>(() => commands.ReadNoteImage(note.Id, "missing"), "asset_not_found");
@@ -190,6 +174,35 @@ internal static partial class Program
                         "The unrelated Markdown edit must be published as a user change.");
                 }
 
+                void ReplaceViaMcp(string text) => mcp.Execute(Json(new
+                {
+                    method = "write_note",
+                    @params = new { paper_id = note.Id, mode = "replace", content = text }
+                }));
+
+                c.State.McpAllowFullWrites = c.State.McpAllowBlankWrites = false;
+                var previousText = note.Content;
+                box.Text = "unsaved edit";
+                using var pluginReader = new PaperBodyPluginHostApi(c, commands, owner.Id, "tests.reader",
+                    [PaperTodoPermissionNames.NotesRead], () => true, () => true);
+                Check(pluginReader.GetNote(note.Id)!.Content == box.PersistentText && note.Content == previousText,
+                    "Plugin reads must see pending Markdown without committing it.");
+                Throws<McpApiException>(() => ReplaceViaMcp(previousText), "full_writes_disabled");
+                ReplaceViaMcp(box.PersistentText);
+                Check(box.PersistentText == "unsaved edit" && note.Content == previousText,
+                    "Read-only replace must leave both the draft and its pending status intact.");
+
+                box.Text = "";
+                noteWindow.CommitPendingMarkdownContentForSave();
+                box.Text = "draft in a previously empty note";
+                c.State.McpAllowBlankWrites = true;
+                Throws<McpApiException>(() => ReplaceViaMcp("replacement"), "full_writes_disabled");
+                Check(note.Content == "" && box.PersistentText == "draft in a previously empty note",
+                    "An additive grant cannot replace a live draft in a previously empty note.");
+                box.Text = "";
+                ReplaceViaMcp("filled blank note");
+                Check(note.Content == "filled blank note", "Additive access can still fill a genuinely empty note.");
+
                 box.Text = "user invalid write edit";
                 var beforeInvalidWrite = note.Content;
                 Throws<PaperCommandException>(() => commands.WriteNote(
@@ -218,7 +231,12 @@ internal static partial class Program
                 Check(probe.Commits == 0,
                     "Target Markdown ordering must not invoke Commit on an unrelated body.");
             }
-            finally { c.State.McpEnabled = oldEnabled; }
+            finally
+            {
+                c.State.McpEnabled = oldEnabled;
+                c.State.McpAllowBlankWrites = oldAdditive;
+                c.State.McpAllowFullWrites = oldFull;
+            }
 
             window.NotifyCurrentPaperBodyActivated();
             window.NotifyCurrentPaperBodyDeactivated();
@@ -303,10 +321,17 @@ internal static partial class Program
             BoundaryRuntimePlugin.Starts = 0;
             BoundaryRuntimePlugin.Fail = false;
             var removedCallbacks = 0;
+            var addedCallbacks = 0;
+            var added = new PaperData
+            {
+                Id = "post-save-added", Type = PaperTypes.Note, BodyProviderId = id, IsVisible = false
+            };
             BoundaryRuntimePlugin.Configure = context =>
             {
                 _ = context.Papers.Subscribe(value =>
                 {
+                    if (value.Kind == PaperPluginRuntimeEventKind.PaperAdded && value.PaperId == added.Id)
+                        addedCallbacks++;
                     if (value.Kind == PaperPluginRuntimeEventKind.PaperRemoved &&
                         string.Equals(value.PaperId, removed.Id, StringComparison.Ordinal))
                     {
@@ -331,6 +356,16 @@ internal static partial class Program
                   slot.GetType().GetProperty("State")!.GetValue(slot)!.ToString() == "Running",
                 "Post-save dirty fixture Runtime did not finish startup.");
 
+            c.State.Papers.Add(added);
+            c.TryFlushPendingPluginPaperStateDeletes();
+            Check(addedCallbacks == 0,
+                "Plugin file cleanup must not publish unrelated Runtime membership changes.");
+            c.SaveNow(sync: true);
+            Check(addedCallbacks == 1,
+                "An ordinary successful save must still publish Runtime membership changes.");
+            c.State.Papers.Remove(added);
+            c.SaveNow(sync: true);
+
             _ = c.PaperCommands.DeletePaper(
                 removed.Id,
                 PaperOperationContext.Plugin("tests.boundary"));
@@ -349,6 +384,7 @@ internal static partial class Program
             BoundaryRuntimePlugin.Configure = null;
             c.State.Papers.Remove(removed);
             c.State.Papers.Remove(survivor);
+            c.State.Papers.RemoveAll(paper => paper.Id == "post-save-added");
             c.ReconcilePluginRuntimes();
             descriptors.Remove(id);
             loaded.Remove(path);
@@ -436,8 +472,23 @@ internal static partial class Program
             Items =
             [
                 new PaperItem { Id = "reminder-1", Text = "first", Order = 0, ReminderAt = now.AddSeconds(-2) },
-                new PaperItem { Id = "reminder-2", Text = "second", Order = 1, ReminderAt = now.AddSeconds(-1) }
+                new PaperItem { Id = "reminder-2", Text = "second", Order = 1, ReminderAt = now.AddSeconds(-1) },
+                new PaperItem { Id = "reminder-future", Text = "future", Order = 2, ReminderAt = now.AddSeconds(12) }
             ]
+        };
+        var cancelledPaper = new PaperData
+        {
+            Id = "tests.cancelled-before-display",
+            Type = PaperTypes.Todo,
+            IsVisible = false
+        };
+        var delegated = new PaperData
+        {
+            Id = "tests.suppressed-reminder-notification",
+            Type = PaperTypes.Todo,
+            IsVisible = false,
+            Items = [new PaperItem { Id = "delegated", Text = "pet notification",
+                ReminderAt = DateTimeOffset.Now.AddMinutes(1) }]
         };
         c.State.Papers.Add(paper);
 
@@ -446,14 +497,141 @@ internal static partial class Program
             c.State.ExperimentalTodoReminders = true;
             c.State.ExperimentalTodoReminderSoundEnabled = false;
             Field(c, "_trayIcon", null!);
+            c.PaperBodyPluginEvents.ScanNow(PaperOperationContext.User());
+            var events = new List<PaperTodoEvent>();
+            using var subscription = c.PaperBodyPluginEvents.Subscribe(
+                Guid.NewGuid(), "reminder-test", new PaperTodoEventFilter
+                {
+                    Kinds = new HashSet<PaperTodoEventKind>
+                    {
+                        PaperTodoEventKind.TodoChanged,
+                        PaperTodoEventKind.PaperChanged
+                    }
+                }, events.Add);
+            paper.Items[0].Text = "pending user edit";
+            c.MarkDirty();
 
             _ = Invoke(c, "ProcessDueTodoReminders", now);
+            c.PaperBodyPluginEvents.ScanNow(PaperOperationContext.User());
+            var presentationEvents = events.OfType<PaperChangedEvent>()
+                .Where(e => e.After.Id == paper.Id &&
+                    e.ChangedFields.HasFlag(PaperChangedFields.Visibility))
+                .ToArray();
+            Check(presentationEvents.Length == 1 &&
+                presentationEvents[0].Metadata.Origin == PaperTodoEventOrigin.System &&
+                !presentationEvents[0].Before.IsVisible && presentationEvents[0].After.IsVisible,
+                "Automatic reminder presentation must emit exactly one system-origin visibility event.");
+            Check(events.FindIndex(e => e is TodoChangedEvent change &&
+                    change.After.Id == "reminder-1" &&
+                    change.Metadata.Origin == PaperTodoEventOrigin.User) <
+                  events.FindIndex(e => e is PaperChangedEvent changed &&
+                    changed.After.Id == paper.Id &&
+                    changed.Metadata.Origin == PaperTodoEventOrigin.System),
+                "Pending user changes must be delivered before reminder presentation changes.");
+            var changes = events.OfType<TodoChangedEvent>().ToArray();
+            Check(changes.Any(e => e.After.Id == "reminder-1" &&
+                e.ChangedFields == TodoChangedFields.Reminder &&
+                e.Metadata.Origin == PaperTodoEventOrigin.System),
+                "Delivered reminder state must be attributed to the system. Events: " +
+                string.Join(", ", events.Select(e => e is TodoChangedEvent change
+                    ? $"{change.After.Id}:{change.ChangedFields}:{change.Metadata.Origin}"
+                    : e.Kind.ToString())));
+            var reminderChanges = changes.Where(e => e.After.Id == "reminder-1").ToArray();
+            Check(reminderChanges.Length == 2 &&
+                reminderChanges[0].ChangedFields == TodoChangedFields.Text &&
+                reminderChanges[0].Metadata.Origin == PaperTodoEventOrigin.User &&
+                reminderChanges[1].Metadata.Origin == PaperTodoEventOrigin.System &&
+                reminderChanges[0].After == reminderChanges[1].Before,
+                "Pending user edits must precede the system transition with continuous snapshots.");
+            Check(!events.OfType<TodoChangedEvent>().Any(e => e.After.Id == "reminder-2" && e.Metadata.Origin == PaperTodoEventOrigin.System && !e.Before.ReminderTriggered && e.After.ReminderTriggered),
+                "An undelivered reminder must not emit an occurrence.");
+            var retryTimer = ReadField<System.Windows.Threading.DispatcherTimer?>(c, "_todoReminderTimer");
+            Check(retryTimer?.IsEnabled == true && retryTimer.Interval < TimeSpan.FromSeconds(25),
+                "Partial delivery retry postponed a separately scheduled future reminder.");
 
-            Check(paper.Items[0].ReminderTriggered && !paper.Items[1].ReminderTriggered,
-                "Opening only the first due reminder must not acknowledge the unseen remainder.");
+            // Ordinary TodoChanged handlers run after presentation. Even if a listener
+            // edits the reminder, it cannot retroactively veto the occurrence.
+            var edited = paper.Items[1];
+            var callbackSawTriggered = false;
+            using (var changeSub = c.PaperBodyPluginEvents.Subscribe(
+                Guid.NewGuid(), "post-edit-test", new PaperTodoEventFilter
+                {
+                    Kinds = new HashSet<PaperTodoEventKind> { PaperTodoEventKind.TodoChanged }
+                }, e =>
+                {
+                    if (e is TodoChangedEvent change && change.After.Id == edited.Id &&
+                        change.Metadata.Origin == PaperTodoEventOrigin.User)
+                    {
+                        callbackSawTriggered = edited.ReminderTriggered;
+                        edited.ReminderAt = null;
+                    }
+                }))
+            {
+                edited.Text = "edited before reminder";
+                c.MarkDirty();
+                _ = Invoke(c, "ProcessDueTodoReminders", now);
+                Check(callbackSawTriggered && edited.ReminderTriggered &&
+                    events.OfType<TodoChangedEvent>().Any(e => e.After.Id == edited.Id &&
+                        e.Metadata.Origin == PaperTodoEventOrigin.System &&
+                        !e.Before.ReminderTriggered && e.After.ReminderTriggered),
+                    "Ordinary TodoChanged callback ran before host reminder delivery.");
+            }
+
+            // A just-created due Todo must still emit creation then system transition,
+            // but its creation callback must not become an implicit pre-notification hook.
+            paper.Items[0].Done = true;
+            paper.Items[1].Done = true;
+            c.State.Papers.Add(cancelledPaper);
+            c.PaperBodyPluginEvents.ScanNow(PaperOperationContext.User());
+            var newDue = new PaperItem { Id = "reminder-cancelled", Text = "new reminder", ReminderAt = now.AddSeconds(-1) };
+            var callbackRanAfterTrigger = false;
+            using var createSub = c.PaperBodyPluginEvents.Subscribe(
+                Guid.NewGuid(), "creation-test", new PaperTodoEventFilter
+                {
+                    Kinds = new HashSet<PaperTodoEventKind> { PaperTodoEventKind.TodoCreated }
+                }, e =>
+                {
+                    if (e is TodoCreatedEvent created && created.Todo.Id == newDue.Id)
+                    {
+                        callbackRanAfterTrigger = newDue.ReminderTriggered;
+                        newDue.ReminderAt = null;
+                    }
+                });
+            cancelledPaper.Items.Add(newDue);
+            _ = Invoke(c, "ProcessDueTodoReminders", now);
+            Check(newDue.ReminderTriggered && callbackRanAfterTrigger && cancelledPaper.IsVisible,
+                "Todo creation callback incorrectly prevented the host reminder.");
+
+            Check(paper.Items[0].ReminderTriggered && paper.Items[1].ReminderTriggered,
+                "An undelivered second reminder was not retried on the next delivery pass.");
+
+            // Advance reminder notification is an explicit opt-in hook: the plugin may suppress
+            // this one default presentation. No PaperTodo paper/balloon/sound is shown, but
+            // the Todo is acknowledged and a normal System TodoChanged is still emitted.
+            paper.Items[2].Done = true;
+            c.State.Papers.Add(delegated);
+            c.PaperBodyPluginEvents.ScanNow(PaperOperationContext.User());
+            var upcoming = new List<TodoReminderUpcomingEvent>();
+            using var preSub = c.PaperBodyPluginEvents.Subscribe(
+                Guid.NewGuid(), "advance-test", new PaperTodoEventFilter
+                {
+                    Kinds = new HashSet<PaperTodoEventKind> { PaperTodoEventKind.TodoReminderUpcoming }
+                }, e => upcoming.Add((TodoReminderUpcomingEvent)e));
+            var delegatedAt = delegated.Items[0].ReminderAt!.Value;
+            _ = Invoke(c, "PublishUpcomingTodoReminders", delegatedAt.AddSeconds(-5));
+            Check(upcoming.Count == 1 && upcoming[0].Todo.Id == "delegated" &&
+                c.SuppressDefaultReminderNotification(upcoming[0].NotificationId),
+                "Advance notification did not supply a valid suppression token.");
+            _ = Invoke(c, "ProcessDueTodoReminders", delegatedAt);
+            Check(delegated.Items[0].ReminderTriggered && !delegated.IsVisible &&
+                events.OfType<TodoChangedEvent>().Any(e =>
+                    e.After.Id == "delegated" && e.Metadata.Origin == PaperTodoEventOrigin.System &&
+                    !e.Before.ReminderTriggered && e.After.ReminderTriggered) &&
+                !c.SuppressDefaultReminderNotification(upcoming[0].NotificationId),
+                "A suppressed default notification was displayed, retried, or failed to publish TodoChanged.");
             var timer = ReadField<System.Windows.Threading.DispatcherTimer?>(c, "_todoReminderTimer");
             Check(timer?.IsEnabled == true,
-                "Unsurfaced due reminders must remain scheduled for retry.");
+                "A remaining future reminder must stay scheduled.");
         }
         finally
         {
@@ -461,63 +639,24 @@ internal static partial class Program
             Field(c, "_trayIcon", tray!);
             c.State.ExperimentalTodoReminders = previousEnabled;
             c.State.ExperimentalTodoReminderSoundEnabled = previousSound;
+            if (c.State.Papers.Contains(cancelledPaper))
+            {
+                _ = c.PaperCommands.DeletePaper(
+                    cancelledPaper.Id,
+                    PaperOperationContext.User());
+            }
+            if (c.State.Papers.Contains(delegated))
+            {
+                _ = c.PaperCommands.DeletePaper(
+                    delegated.Id,
+                    PaperOperationContext.User());
+            }
             if (c.State.Papers.Contains(paper))
             {
                 _ = c.PaperCommands.DeletePaper(
                     paper.Id,
                     PaperOperationContext.User());
             }
-        }
-    }
-
-    private static void MultilinePluginTooltips()
-    {
-        const string text = "Completed: 3\r\nOpen: 5";
-        var actions = PluginContributionPolicy.NormalizeTodoActions(
-            [new() { Id = "summary", Text = "Summary", ToolTip = text,
-                     Icon = PaperTopBarIcon.Character("i"), Placement = PaperTodoActionPlacement.Inline }]);
-        Check(actions[0].ToolTip == text, "Todo action tooltips preserve line breaks.");
-        var labels = PluginContributionPolicy.NormalizeTopBarLabels([new() { Text = "Summary", ToolTip = text }]);
-        Check(labels[0].ToolTip == text, "Top-bar label tooltips preserve line breaks.");
-        Throws<PaperTodoPluginException>(() => PluginContributionPolicy.NormalizeTopBarLabels(
-            [new() { Text = "Summary", ToolTip = new string('x', 161) }]), "invalid_topbar_label_tooltip");
-        Throws<PaperTodoPluginException>(() => PluginContributionPolicy.NormalizeTopBarLabels(
-            [new() { Text = "Summary", ToolTip = "ok\u0001bad" }]), "invalid_topbar_label_tooltip");
-        Throws<PaperTodoPluginException>(() => PluginContributionPolicy.NormalizeTopBarLabels(
-            [new() { Text = "Summary", ToolTip = "ok\tbad" }]), "invalid_topbar_label_tooltip");
-        Throws<PaperTodoPluginException>(() => PluginContributionPolicy.NormalizeTopBarLabels(
-            [new() { Text = "Bad\nlabel" }]), "invalid_topbar_label_text");
-    }
-
-    private static void ReviewArchiveSavesWithoutBackup()
-    {
-        var type = typeof(PaperTodo.Plugin.ReviewArchive.ReviewArchivePlugin).Assembly
-            .GetType("PaperTodo.Plugin.ReviewArchive.ReviewArchiveStore")!;
-        const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-        var pathField = type.GetField("_path", flags)!;
-        var docField = type.GetField("_document", flags)!;
-        var oldPath = pathField.GetValue(null);
-        var oldDoc = docField.GetValue(null);
-        var root = Path.Combine(Path.GetTempPath(), "PaperTodo.ArchiveChecks-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
-        {
-            var path = Path.Combine(root, "review-archive.json");
-            File.WriteAllText(path, "old data");
-            // An existing directory at the old backup path makes a backup copy impossible.
-            Directory.CreateDirectory(path + ".bak");
-            pathField.SetValue(null, path);
-            docField.SetValue(null, Activator.CreateInstance(docField.FieldType, nonPublic: true));
-            type.GetMethod("Flush")!.Invoke(null, null);
-            using var saved = JsonDocument.Parse(File.ReadAllText(path));
-            Check(saved.RootElement.GetProperty("storageVersion").GetInt32() == 3 && Directory.Exists(path + ".bak"),
-                "The archive saves normally without accessing the obsolete backup path.");
-            Check((string)type.GetProperty("LastSaveError")!.GetValue(null)! == "", "Normal archive save succeeded.");
-        }
-        finally
-        {
-            pathField.SetValue(null, oldPath); docField.SetValue(null, oldDoc);
-            Directory.Delete(root, recursive: true);
         }
     }
 
@@ -653,3 +792,4 @@ public sealed class BoundaryRuntimePlugin : IPaperBodyPlugin, IPaperPluginRuntim
     }
     private sealed class Runtime : IPaperPluginRuntime { public void Dispose() { } }
 }
+

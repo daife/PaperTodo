@@ -88,6 +88,7 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
     private bool _closingByOwner;
     private bool _hasBeenShown;
     private bool _nativeDragAttemptActive;
+    private WindowNative.SystemAwareCaptionAnchor? _pendingCaptionAnchor;
     private bool _isClosed;
 
     public EdgeCapsuleDragWindow(EdgeCapsuleDragWindowOptions options)
@@ -171,6 +172,10 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         }
     }
 
+    internal static IntPtr VisibleLeaseHandle => s_pooledHostLeased &&
+        s_pooledHost is { IsVisible: true } host
+            ? new System.Windows.Interop.WindowInteropHelper(host).Handle : IntPtr.Zero;
+
     public static EdgeCapsuleDragWindow Rent(EdgeCapsuleDragWindowOptions options)
     {
         VerifyPoolThreadAccess();
@@ -216,21 +221,6 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         }
     }
 
-    internal void BeginDragBackground()
-    {
-        if (_paperBackground is SkinBorder skin) skin.BeginDragBackground();
-    }
-
-    internal void UseDragBackground(DesktopBackgroundCapture.Snapshot snapshot)
-    {
-        if (_paperBackground is SkinBorder skin) skin.UseDragBackground(snapshot);
-    }
-
-    internal void EndDragBackground()
-    {
-        if (_paperBackground is SkinBorder skin) skin.EndDragBackground();
-    }
-
     public void ReturnToPool()
     {
         VerifyAccess();
@@ -255,7 +245,6 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         try
         {
             ParkHidden();
-            EndDragBackground();
             ResetTransientPresentation();
             s_pooledHostLeased = false;
 #if DEBUG
@@ -321,7 +310,8 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         DeviceScreenPoint pointer,
         bool animate,
         double scaleFrom,
-        int durationMilliseconds)
+        int durationMilliseconds,
+        bool alignToDragMessage = false)
     {
 #if DEBUG
         var totalStartedAt = EdgeCapsulePerformanceDiagnostics.Timestamp();
@@ -361,7 +351,7 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
             var metricsMs = EdgeCapsulePerformanceDiagnostics.ElapsedMilliseconds(stageStartedAt);
             stageStartedAt = EdgeCapsulePerformanceDiagnostics.Timestamp();
 #endif
-            PlaceCenteredAtCursorForDrag(pointer);
+            PlaceCenteredAtCursorForDrag(pointer, alignToDragMessage);
 #if DEBUG
             var centerMs = EdgeCapsulePerformanceDiagnostics.ElapsedMilliseconds(stageStartedAt);
 #endif
@@ -399,7 +389,7 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         var animatedMetricsMs = EdgeCapsulePerformanceDiagnostics.ElapsedMilliseconds(stageStartedAt);
         stageStartedAt = EdgeCapsulePerformanceDiagnostics.Timestamp();
 #endif
-        PlaceCenteredAtCursorForDrag(pointer);
+        PlaceCenteredAtCursorForDrag(pointer, alignToDragMessage);
 #if DEBUG
         var animatedCenterMs = EdgeCapsulePerformanceDiagnostics.ElapsedMilliseconds(stageStartedAt);
 #endif
@@ -462,8 +452,21 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
     // mapping does not honor on mixed-DPI zones, so re-place the shown window once from inside
     // its own System Aware space; Windows then resolves the exact physical rectangle for the
     // cursor's monitor before the native move loop takes ownership.
-    private void PlaceCenteredAtCursorForDrag(DeviceScreenPoint fallbackPointer)
+    private void PlaceCenteredAtCursorForDrag(
+        DeviceScreenPoint fallbackPointer,
+        bool alignToDragMessage)
     {
+        // Capture the last dequeued mouse message while the HWND is still invisible.
+        // WPF can dequeue a newer move later; reuse this exact anchor when caption drag starts.
+        _pendingCaptionAnchor = null;
+        if (alignToDragMessage &&
+            WindowNative.TryCenterSystemAwareWindowAtMessagePosition(
+                this, _widthDip, _heightDip, out var captured))
+        {
+            _pendingCaptionAnchor = captured;
+            return;
+        }
+
         if (!WindowNative.TryCenterSystemAwareWindowAtCursor(this, _widthDip, _heightDip))
         {
             PlaceCenteredAtForShow(fallbackPointer);
@@ -548,7 +551,8 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
             if (!WindowNative.TryBeginSystemAwareWindowCaptionDragFromCursor(
                     this,
                     _widthDip,
-                    _heightDip))
+                    _heightDip,
+                    _pendingCaptionAnchor))
             {
                 return new EdgeCapsuleNativeDragOutcome(
                     EdgeCapsuleNativeDragResult.NotStarted,
@@ -578,6 +582,7 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
             CompleteNativeDragDiagnostics(diagnosticResult);
 #endif
             _nativeDragAttemptActive = false;
+            _pendingCaptionAnchor = null;
         }
     }
 
@@ -769,6 +774,7 @@ internal sealed partial class EdgeCapsuleDragWindow : Window
         _lastDockingEdge = null;
         _dockingPresentationActive = false;
         _nativeDragAttemptActive = false;
+        _pendingCaptionAnchor = null;
     }
 
     private bool EnsureSystemAwareHandle()

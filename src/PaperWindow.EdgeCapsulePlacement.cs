@@ -14,6 +14,11 @@ public sealed partial class PaperWindow
         return DeepCapsuleVisibleWidth(DeepCapsuleSlotDpi().PixelsPerDip);
     }
 
+    internal double DeepCapsuleRestingVisibleWidthFor(MonitorGeometry geometry) =>
+        HoldsDeepCapsuleSlotWhileExpanded
+            ? DeepCapsuleExpandedBodyWidth(geometry) + CapsuleCloseWidth
+            : DeepCapsuleVisibleWidth(geometry.DpiScaleY);
+
     private double DeepCapsuleVisibleWidth(double pixelsPerDip, bool limitTitle = true)
     {
         var pluginContentWidth = PluginCapsuleRequestedContentWidth(pixelsPerDip);
@@ -139,7 +144,8 @@ public sealed partial class PaperWindow
         RefreshEffectiveTopmost();
     }
 
-    internal void PreviewDeepCapsulePlacement(EdgeCapsulePlacement placement)
+    internal void PreviewDeepCapsulePlacement(EdgeCapsulePlacement placement, bool animate = true,
+        bool anchorChanged = false)
     {
         if (!HasDeepCapsuleSlotPlacement ||
             _edgeCapsuleHost?.IsVisible != true ||
@@ -149,18 +155,26 @@ public sealed partial class PaperWindow
             return;
         }
 
-        if (!UpdateEdgeCapsuleQueuePlacement(placement))
+        // A moving master changes the queue's layout anchor without changing its
+        // members' slot indices. Refresh that layout through the same Presenter.
+        if (_edgeCapsule.Placement == placement.Normalize())
+        {
+            if (!anchorChanged) return;
+        }
+        else if (!UpdateEdgeCapsuleQueuePlacement(placement))
         {
             return;
         }
+        if (!animate)
+            _controller.CompleteEdgeCapsuleQueueCompositionProxyFor(this);
         if (!TryStageEdgeCapsuleVisualTransaction(
-                animate: true,
+                animate: animate,
                 EdgeCapsuleTransitionReason.Placement,
                 EdgeCapsuleLayout.SlotMoveMilliseconds,
                 refreshLayout: true))
         {
             RequestEdgeCapsulePresentation(
-                animate: true,
+                animate: animate,
                 EdgeCapsuleTransitionReason.Placement,
                 EdgeCapsuleLayout.SlotMoveMilliseconds,
                 refreshLayout: true);

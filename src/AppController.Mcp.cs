@@ -60,7 +60,9 @@ public sealed partial class AppController
                 State.McpAllowFullWrites,
                 State.McpAllowDeletes);
             var target = CodexMcpPermission.FullAccess;
+            if (IsWorkspaceSwitching) return false;
             if (previous == target) return true;
+            if (FollowsMainWorkspaceSettings) return false;
 
             State.McpEnabled = target.Enabled;
             State.McpAllowBlankWrites = target.BlankWrites;
@@ -77,7 +79,7 @@ public sealed partial class AppController
             }
 
             RefreshMcpRuntime();
-            RefreshSettingsRegions("labs.mcp");
+            RefreshSettingsRegions("workspace.mcp");
             return true;
         }
         catch (Exception ex)
@@ -95,12 +97,6 @@ public sealed partial class AppController
 
     private void ToggleMcpDeletes() =>
         SetSettingFromUi("mcp.deletes", !State.McpAllowDeletes);
-
-    internal bool TryCommitMcpMutation()
-    {
-        MarkDirty();
-        return TrySaveNow(sync: true);
-    }
 
     internal void RunMcpPostCommitUi(Action update)
     {
